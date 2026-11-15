@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "superhero-control"
+version = "0.1.0"
+description = "Multimodal, AI-powered desktop control: look to point, blink to click, speak to act."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "GPL-3.0-only"
+authors = [{ name = "Luc Prevost" }]
+dependencies = [
+  # Gaze engine (Apache-2.0). Not on PyPI yet; pinned to an inspected commit.
+  "fovea-input @ git+https://github.com/Wega-Labs/fovea.git@779d4a853a5a0f4fb3ca4bba3d39d8670913ba9c",
+  # Imported directly (hands, pen, bench) as well as through Fovea; same ranges as Fovea's.
+  "mediapipe>=0.10.21,<0.11",
+  "opencv-contrib-python>=4.10,<6",
+  # Essentials + Addons (Qt Multimedia) without the WebEngine/PDF wheels the meta-package pulls in.
+  "PySide6-Essentials>=6.8,<7",
+  "PySide6-Addons>=6.8,<7",
+  "faster-whisper>=1.1,<2",
+  "numpy>=1.26,<3",
+  "platformdirs>=4.3,<5",
+  "pynput>=1.7.7,<2",
+  "jeepney>=0.8,<1; sys_platform == 'linux'",
+]
+
+# A dependency group (not an extra) so plain `uv sync` / `uv run` include the dev tools.
+[dependency-groups]
+dev = ["pytest>=8.4,<10", "ruff>=0.17.5,<1"]
+# Only needed to build distributable bundles: `uv run --group package python packaging/build.py`.
+package = ["pyinstaller>=6.11,<7"]
+
+[project.urls]
+Homepage = "https://github.com/ninja7v/superhero"
+
+[project.scripts]
+superhero = "superhero.app:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/superhero"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
+ignore = ["E501"]  # the formatter owns line length; long UI strings are left alone

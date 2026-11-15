@@ -1,0 +1,8 @@
+SUPERHERO
+Copyright 2026 Luc Prevost
+Licensed under the GNU General Public License, version 3 (see LICENSE).
+Commercial licences are available on request: https://github.com/ninja7v
+
+This product depends on Fovea (https://github.com/Wega-Labs/fovea),
+Copyright Wega Labs, licensed under the Apache License 2.0.
+tests/fixtures/frontal_30f.jsonl is copied unmodified from that project.
