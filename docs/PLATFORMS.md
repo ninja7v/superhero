@@ -12,7 +12,7 @@ and models, and changes nothing.
 | Camera, gaze, overlay | **Works** | Not run | Not run | Not run |
 | Click and type injection | **Works** (desktop portal) | Not run | Not run | Not run |
 | Adaptive pointer colour | No (Wayland blocks screen reading) | Expected | Expected | Needs Screen Recording |
-| Tests and packaged build | **Pass** | — | In CI | In CI |
+| Tests and packaged build | **Pass** | In CI (Xvfb) | In CI | In CI |
 
 ## Differences handled in code
 
@@ -49,7 +49,7 @@ package it contains. It is about 0.9 GB and does not include the speech model.
 ## Bring-up checklist
 
 1. `superhero doctor`: every line should make sense.
-2. `uv run pytest`.
+2. `uv run pytest`, then the platform checks in [Testing and CI](TESTING.md#platform-matrix).
 3. Start SUPERHERO, check that the Camera page shows your face, then calibrate.
 4. Is the laser above every window, including full-screen ones, and do clicks pass through it?
 5. Turn control on. Does each wink click the right button, *where you look*?

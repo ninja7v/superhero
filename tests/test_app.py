@@ -1,11 +1,13 @@
 """The whole application, offscreen, with recorded landmarks instead of a camera and model."""
 
 import os
+import sys
 import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PySide6.QtWidgets import QApplication
 
 from superhero.perception import pipeline as pipeline_module
@@ -253,3 +255,39 @@ def test_without_a_system_tray_closing_the_panel_quits(monkeypatch):
         assert quits == [True]
     finally:
         controller.shutdown()
+
+
+def cli(monkeypatch, *args):
+    """Run ``superhero ARGS`` in-process, keeping the environment it sets up to this test."""
+    from superhero.app import main
+
+    monkeypatch.setattr(sys, "argv", ["superhero", *args])
+    monkeypatch.setenv("QT_QPA_PLATFORM", os.environ.get("QT_QPA_PLATFORM", "offscreen"))
+    monkeypatch.setenv("OPENCV_LOG_LEVEL", "FATAL")
+    return main()
+
+
+def test_cli_doctor_returns_the_report_status(monkeypatch):
+    from superhero import doctor
+
+    monkeypatch.setattr(doctor, "main", lambda: 3)
+    assert cli(monkeypatch, "doctor") == 3
+
+
+def test_cli_install_desktop_writes_the_entry(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert cli(monkeypatch, "install-desktop") == 0
+    assert "Installed" in capsys.readouterr().out
+
+
+def test_cli_bench_needs_a_readable_image(monkeypatch, tmp_path, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        cli(monkeypatch, "bench")
+    assert exit_info.value.code == 2 and "bench needs --image" in capsys.readouterr().err
+    assert cli(monkeypatch, "bench", "--image", str(tmp_path / "missing.png")) == 2
+    assert "Cannot read image" in capsys.readouterr().err
+
+
+def test_cli_rejects_unknown_commands(monkeypatch):
+    with pytest.raises(SystemExit):
+        cli(monkeypatch, "fly")

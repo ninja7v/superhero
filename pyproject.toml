@@ -45,8 +45,12 @@ allow-direct-references = true
 packages = ["src/superhero"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q --strict-markers"
 testpaths = ["tests"]
+markers = [
+  # Skipped unless SUPERHERO_ALLOW_REAL_INPUT=1; CI sets it only on its disposable Windows runner.
+  "real_input: moves the real pointer (never clicks or types)",
+]
 
 [tool.ruff]
 target-version = "py312"

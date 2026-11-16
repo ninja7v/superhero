@@ -51,10 +51,8 @@ def test_native_backend_knows_every_canonical_key():
     assert set(backend._buttons) == {"left", "right", "middle"}
 
 
-@pytest.mark.skipif(
-    not (sys.platform == "win32" and os.environ.get("CI")),
-    reason="moves the real mouse pointer; only on a disposable Windows CI desktop",
-)
+@pytest.mark.real_input
+@pytest.mark.skipif(sys.platform != "win32", reason="checks SendInput's coordinate mapping")
 def test_windows_pointer_really_moves():
     from pynput import mouse
 

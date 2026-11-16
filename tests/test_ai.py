@@ -118,12 +118,7 @@ def ai_rig(plan=PLAN, **kwargs):
 
 
 def wait_for_plan(rig, calls):
-    import time
-
-    deadline = time.monotonic() + 2
-    while rig.input.calls != calls and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert rig.input.calls == calls
+    wait_until(lambda: rig.input.calls == calls)
 
 
 def test_wake_word_proposes_a_plan_but_runs_nothing():
@@ -213,3 +208,124 @@ def test_a_multi_word_wake_word_is_removed_whole():
     rig.config.ai.wake_word = "Hey computer"
     rig.engine.handle_utterance("Hey, computer, open a new tab.")
     assert rig.asked == ["open a new tab."]
+
+
+def proposed(**kwargs):
+    """A rig with the standard plan awaiting confirmation, and the notices the engine gives."""
+    notices = []
+    rig = ai_rig(on_notice=notices.append, **kwargs)
+    rig.engine.handle_utterance("computer open a tab")
+    return rig, notices
+
+
+def wait_until(condition):
+    import time
+
+    deadline = time.monotonic() + 2
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert condition()
+
+
+def test_emergency_stop_halts_a_plan_that_is_already_running():
+    import threading
+
+    in_wait, resume = threading.Event(), threading.Event()
+
+    def sleep(seconds):
+        if seconds == 0.5:  # the plan's own "wait" step: hold the plan here
+            in_wait.set()
+            resume.wait(2)
+
+    rig, notices = proposed(sleep=sleep)
+    assert rig.engine.handle_utterance("yes") == "Running the plan"
+    assert in_wait.wait(2)
+    rig.engine.emergency_stop()
+    resume.set()
+    wait_until(lambda: notices)
+    assert notices == ["Plan stopped at step 3"]
+    assert rig.input.calls == [("keys", "ctrl+t")]  # "type hello" never reached the desktop
+
+
+def test_a_failing_step_ends_the_plan_and_disarms():
+    rig, notices = proposed()
+    rig.input.fail = True  # the input session dies before the first step
+    assert rig.engine.handle_utterance("yes") == "Running the plan"
+    wait_until(lambda: notices)
+    assert notices == ["Plan failed at step 1: key ctrl+t"]
+    assert not rig.engine.armed and rig.input.calls == []
+
+
+@pytest.fixture
+def ollama():
+    """A stand-in Ollama server on this machine: real HTTP, canned replies, no model."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    state = {"status": 200, "reply": {}, "requests": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state["requests"].append((self.path, body))
+            self.send(state["status"], state["reply"])
+
+        def do_GET(self):
+            state["requests"].append((self.path, None))
+            self.send(200, {"models": [{"name": "small:4b"}, {"name": "big:27b"}]})
+
+        def send(self, status, payload):
+            data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    state["config"] = AIConfig(
+        enabled=True, model="small:4b", url=f"http://127.0.0.1:{server.server_port}"
+    )
+    yield state
+    server.shutdown()
+    server.server_close()
+
+
+def ollama_says(content):
+    import json
+
+    return {"message": {"content": content if isinstance(content, str) else json.dumps(content)}}
+
+
+def test_a_plan_from_a_local_ollama_is_validated_before_use(ollama):
+    from superhero.ai.planner import list_models
+
+    ollama["reply"] = ollama_says({"steps": [step("key", "Ctrl+T")], "explanation": "A tab."})
+    plan = make_plan("open a tab", ollama["config"], platform="win32", timeout=5)
+    assert plan.steps == (Command("key", "ctrl+t"),) and plan.explanation == "A tab."
+    path, body = ollama["requests"][-1]
+    assert path == "/api/chat" and body["model"] == "small:4b" and body["stream"] is False
+    assert body["format"]["type"] == "object"  # the reply is constrained to the plan schema
+    assert "Windows 11" in body["messages"][0]["content"]
+    assert body["messages"][1] == {"role": "user", "content": "open a tab"}
+    assert list_models(ollama["config"]) == ["big:27b", "small:4b"]
+
+
+@pytest.mark.parametrize(
+    ("status", "reply", "error"),
+    [
+        (500, {"error": "model crashed"}, r"refused the request \(500\)"),
+        (200, b"<html>not json</html>", "could not be understood"),
+        (200, ollama_says("I would rather chat."), "could not be understood"),
+        (200, ollama_says({"steps": [step("shell", "rm -rf ~")]}), "not allowed: shell"),
+    ],
+)
+def test_a_bad_ollama_reply_is_a_readable_error(ollama, status, reply, error):
+    ollama["status"], ollama["reply"] = status, reply
+    with pytest.raises(AIUnavailable, match=error):
+        make_plan("open a tab", ollama["config"], timeout=5)

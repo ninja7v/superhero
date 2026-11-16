@@ -1,13 +1,20 @@
 name: tests
 
+# Each run first works out what the change can affect (.github/scripts/ci_plan.py, rules in
+# docs/TESTING.md), then runs only that, for every commit of a pull request. The scheduled
+# and manual runs do everything, bundles included.
+# Make "ci-ok" the required status check: it stands for whichever jobs the plan chose.
+
 on:
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "17 4 1,15 * *" # the 1st and 15th: a full run against runner-image and upstream drift
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -16,7 +23,31 @@ env:
   QT_QPA_PLATFORM: offscreen
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      lint: ${{ steps.plan.outputs.lint }}
+      tests: ${{ steps.plan.outputs.tests }}
+      test_files: ${{ steps.plan.outputs.test_files }}
+      os: ${{ steps.plan.outputs.os }}
+      package: ${{ steps.plan.outputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the diff spans every commit of the pull request
+
+      # Standard library only, so nothing is installed before the decision.
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }} # empty on scheduled and manual runs
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/ci_plan.py --event "$EVENT" "$BASE" "$HEAD"
+
   lint:
+    needs: changes
+    if: needs.changes.outputs.lint == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -24,29 +55,35 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync --locked
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
+          cache-suffix: lint # a small cache of its own; sharing the key would starve the tests'
+      # Ruff alone, at the locked version: none of the project's heavy dependencies.
+      - run: uv run --locked --only-group dev ruff check .
+      - run: uv run --locked --only-group dev ruff format --check .
 
   tests:
     name: tests (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false # each platform's result is wanted even when another fails
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(needs.changes.outputs.os) }}
     steps:
       - uses: actions/checkout@v4
 
       # OpenCV and Qt load these at import time; the Linux runner image does not ship them.
+      # Xvfb gives the X11 input backend a (virtual, disposable) display to load against.
       - name: Install system libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libegl1 libglib2.0-0
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libegl1 libglib2.0-0 xvfb xauth
 
       - uses: astral-sh/setup-uv@v5
         with:
-          enable-cache: true
+          enable-cache: true # keeps the wheel built from the pinned Fovea commit between runs
 
       # Python 3.12 comes from requires-python; --locked fails if uv.lock is out of date.
       - name: Install dependencies
@@ -54,15 +91,23 @@ jobs:
 
       # What this platform offers: displays, input control, models. Fails if a core part is broken.
       - name: Platform report
-        run: uv run superhero doctor
+        shell: bash
+        run: ${{ runner.os == 'Linux' && 'xvfb-run -a' || '' }} uv run superhero doctor
 
-      # The suite needs no camera, microphone, display or model download.
+      # No camera, microphone, model download or network; tests/conftest.py refuses real
+      # input. The one exception is the Windows runner: a throwaway VM, where one test
+      # moves (never clicks with) the pointer to check SendInput's coordinate mapping.
       - name: Test
-        run: uv run pytest
+        shell: bash
+        env:
+          TEST_FILES: ${{ needs.changes.outputs.test_files }} # empty: all of them
+          SUPERHERO_ALLOW_REAL_INPUT: ${{ runner.os == 'Windows' && '1' || '' }}
+        run: ${{ runner.os == 'Linux' && 'xvfb-run -a' || '' }} uv run pytest -rs $TEST_FILES
 
   package:
     name: package (${{ matrix.os }})
-    needs: tests
+    needs: [changes, tests]
+    if: needs.changes.outputs.package == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -79,21 +124,36 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-suffix: package # holds PyInstaller too
 
       - name: Build bundle
         run: uv run --locked --group package python packaging/build.py
 
       # The bundle must start and import its heavy dependencies outside the dev environment,
-      # and carry the licences of what it redistributes (the build warns about any gap).
+      # carry its UI assets, and carry the licences of what it redistributes (the build warns
+      # about any gap).
       - name: Smoke-test the bundle
         shell: bash
         run: |
           ./dist/superhero/superhero doctor
           test -s dist/superhero/THIRD_PARTY_NOTICES.txt
+          test -s dist/superhero/LICENSE
           test -s dist/superhero/licenses/common/LGPL-3.0.txt
+          test -n "$(find dist/superhero -name chevron-down.svg -print -quit)"
 
       - uses: actions/upload-artifact@v4
         with:
           name: superhero-${{ runner.os }}-${{ runner.arch }}
           path: dist/superhero*
           retention-days: 14
+
+  # The single required check: green when every job the plan chose passed (skipped is fine).
+  ci-ok:
+    if: always()
+    needs: [changes, lint, tests, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo "Every job this change needs has passed."

@@ -1,6 +1,6 @@
 # 🔴SUPERHERO
 
-**Look to point. Wink to click. Open your mouth and speak.**
+**Look to point. Wink to click. Speak to command.**
 
 Laser in your eyes, magic in your wand, and the force is with you.
 SUPERHERO lets you control your computer with an ordinary webcam and microphone. A laser dot
@@ -68,6 +68,7 @@ adds the overlay, gestures, input control, voice and settings.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Roadmap and status](docs/ROADMAP.md)
 - [Platforms and packaging](docs/PLATFORMS.md)
+- [Testing and CI](docs/TESTING.md)
 - [Related work](docs/RELATED_WORK.md)
 - [Third-party licences](docs/LICENSING.md)
 

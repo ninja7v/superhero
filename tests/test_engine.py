@@ -64,8 +64,7 @@ class Rig:
             on_voice_toggle=lambda: setattr(self, "voice_toggles", self.voice_toggles + 1),
             on_voice_arm=self.voice_arms.append,
             clock=lambda: self.now,
-            sleep=lambda _s: None,
-            **kwargs,
+            **{"sleep": lambda _s: None, **kwargs},
         )
         self.engine.set_armed(armed)
         self.engine.handle(TrackingState(TrackingStatus.ACTIVE, 0.9, 0))
@@ -203,6 +202,22 @@ def test_emergency_stop_releases_a_drag_and_disarms():
     assert rig.input.calls[-1] == ("button", "left", False)
 
 
+def test_emergency_stop_disarms_even_when_releasing_the_drag_fails():
+    rig = Rig()
+    rig.config.gestures.bindings["long_blink"] = "drag_toggle"
+    rig.look()
+    rig.engine.gesture("long_blink")
+    sent = len(rig.input.calls)
+    rig.input.fail = True  # the session died with the button held
+    rig.engine.emergency_stop()
+    assert not rig.engine.armed and not rig.engine.dragging
+    rig.input.fail = False
+    rig.look()
+    rig.wink()
+    rig.engine.gesture("long_blink")
+    assert len(rig.input.calls) == sent  # nothing more reaches the desktop until re-armed
+
+
 def test_pause_gesture_works_while_disarmed():
     rig = Rig(armed=False)
     rig.config.gestures.bindings["head_nod"] = "pause_toggle"
@@ -268,11 +283,14 @@ def test_utterance_routing(mode, spoken, calls, outcome, monkeypatch):
     assert rig.input.calls == calls
 
 
-def test_launch_goes_through_the_desktop_launcher(monkeypatch):
-    monkeypatch.setattr("sys.platform", "linux")
+@pytest.mark.parametrize(
+    ("platform", "opener"), [("linux", "super"), ("win32", "super"), ("darwin", "cmd+space")]
+)
+def test_launch_goes_through_the_desktop_launcher(monkeypatch, platform, opener):
+    monkeypatch.setattr("sys.platform", platform)
     rig = Rig()
     assert rig.engine.run_command(Command("launch", "firefox"))
-    assert rig.input.calls == [("keys", "super"), ("type", "firefox"), ("keys", "enter")]
+    assert rig.input.calls == [("keys", opener), ("type", "firefox"), ("keys", "enter")]
 
 
 def test_engine_without_input_backend_cannot_be_armed():
