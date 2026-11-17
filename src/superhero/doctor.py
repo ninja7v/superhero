@@ -81,6 +81,19 @@ def _overlay() -> str:
     return f"{name}: click-through, always on top; background colour sampling: {sampling}"
 
 
+def _accessibility() -> str:
+    from superhero.platform.accessibility import open_desktop, snapping_problem
+
+    desktop = open_desktop()
+    try:
+        count = len(desktop.windows())
+    finally:
+        desktop.close()
+    problem = snapping_problem()
+    snapping = f"unavailable ({problem})" if problem else "available"
+    return f"{count} windows readable; click snapping {snapping}"
+
+
 def _ai() -> str:
     from superhero.ai.planner import list_models
     from superhero.config import AIConfig
@@ -109,6 +122,7 @@ def report() -> list[tuple[str, str]]:
         _check("Microphones", _microphones),
         _check("Input control", input_status),
         _check("Emergency shortcut", _hotkey),
+        _check("Accessibility", _accessibility),
         _check("Gaze engine", _landmarks),
         _check("Speech", _speech),
         _check("AI models", _ai),

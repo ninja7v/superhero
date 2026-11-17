@@ -291,3 +291,164 @@ def test_cli_bench_needs_a_readable_image(monkeypatch, tmp_path, capsys):
 def test_cli_rejects_unknown_commands(monkeypatch):
     with pytest.raises(SystemExit):
         cli(monkeypatch, "fly")
+
+
+def test_permission_granted_during_calibration_arms_only_after_it(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    from superhero import app as app_module
+
+    release = threading.Event()
+
+    def slow_permission(_displays):
+        release.wait(5)
+        return FakeInput()
+
+    monkeypatch.setattr(app_module, "create_input_backend", slow_permission)
+    app, controller = make_controller(monkeypatch)
+    try:
+        controller.pipeline = SimpleNamespace(
+            calibrated=True, stop=lambda: None, calibrate=lambda n: None
+        )
+        controller.set_armed(True)  # the permission dialog is up...
+        controller.start_calibration()  # ...and the user starts calibrating meanwhile
+        release.set()
+        assert pump(app, lambda: controller.engine.input is not None)
+        assert not controller.engine.armed, "winks would click during the calibration"
+        controller._close_calibration()
+        assert controller.engine.armed
+    finally:
+        controller.shutdown()
+
+
+def test_control_switched_off_by_the_engine_stays_off_after_calibration(monkeypatch):
+    from types import SimpleNamespace
+
+    _app, controller = make_controller(monkeypatch)
+    try:
+        controller.pipeline = SimpleNamespace(
+            calibrated=True, stop=lambda: None, calibrate=lambda n: None
+        )
+        backend = controller.engine.input = FakeInput()
+        controller.set_armed(True)
+        assert controller.engine.armed
+
+        def broken(*_args):
+            raise RuntimeError("portal session closed")
+
+        backend.button = broken
+        from fovea.events import TrackingStatus
+
+        controller.engine.tracking = TrackingStatus.ACTIVE
+        controller.engine.pointer, controller.engine._pointer_at = (0.5, 0.5), 1e12
+        controller.engine.perform("left_click")  # the injection fails: control goes off
+        assert not controller.engine.armed
+        controller.start_calibration()
+        controller._close_calibration()
+        assert not controller.engine.armed
+
+        controller.engine.perform("pause_toggle")  # the pause gesture is a choice too
+        controller.start_calibration()
+        controller._close_calibration()
+        assert controller.engine.armed
+    finally:
+        controller.shutdown()
+
+
+def test_all_displays_get_an_overlay_and_a_calibration_window(monkeypatch):
+    from types import SimpleNamespace
+
+    from superhero import app as app_module
+    from superhero.platform.displays import ALL_DISPLAYS, Display
+
+    main = Display("main", 0, 0, 1920, 1080, primary=True)
+    right = Display("right", 1920, 0, 1280, 1024)
+    monkeypatch.setattr(app_module, "detect_displays", lambda: [main, right])
+    _app, controller = make_controller(monkeypatch)
+    try:
+        controller.config.active_display = ALL_DISPLAYS
+        controller.restart_pipeline()
+        assert controller.display.parts == (main, right)
+        overlays = controller.overlay._children
+        assert [o._display for o in overlays] == [main, right]
+
+        controller.overlay.set_pointer(controller.display.normalize(2500, 500), True)
+        assert overlays[1]._visible and not overlays[0]._visible
+        controller.overlay.set_pointer(controller.display.normalize(100, 100), True)
+        assert overlays[0]._visible and not overlays[1]._visible
+        controller.overlay.set_status("Listening", True)
+        assert overlays[0]._status == "Listening" and overlays[1]._status == ""
+
+        controller.pipeline.stop()
+        controller.pipeline = SimpleNamespace(calibrated=False, stop=lambda: None,
+                                              calibrate=lambda n: None)  # fmt: skip
+        controller.start_calibration()
+        windows = controller._calibration
+        assert [w.geometry().x() for w in windows] == [0, 1920]
+        assert [w._texts for w in windows] == [True, False]  # instructions on the primary
+        controller._close_calibration()
+        assert controller._calibration is None
+    finally:
+        controller.shutdown()
+
+
+def test_the_desktop_reader_is_optional(monkeypatch):
+    from superhero import app as app_module
+    from superhero.platform.accessibility import DesktopUnavailable, Element, Window
+
+    class FakeDesktop:
+        can_locate = True
+
+        def windows(self):
+            return [Window("editor", "notes", focused=True)]
+
+        def element_at(self, x, y):
+            return Element("push button", 900, 500, 120, 30)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_module, "open_desktop", FakeDesktop)
+    _app, controller = make_controller(monkeypatch)
+    try:
+        assert controller.desktop_context() == "- editor: notes (focused)"
+        controller.config.ai.share_windows = False
+        assert controller.desktop_context() == ""
+        assert controller.snap(controller.display, 0.5, 0.5) is None  # already on the button
+    finally:
+        controller.shutdown()
+
+    def refused():
+        raise DesktopUnavailable("no accessibility bus")
+
+    monkeypatch.setattr(app_module, "open_desktop", refused)
+    _app, controller = make_controller(monkeypatch)
+    try:
+        assert controller.desktop_context() == ""
+        assert controller.snap(controller.display, 0.5, 0.5) is None
+    finally:
+        controller.shutdown()
+
+
+def test_an_unavailable_desktop_reader_is_retried_later(monkeypatch):
+    from superhero import app as app_module
+    from superhero.platform.accessibility import DesktopUnavailable
+
+    attempts = []
+
+    def refused():
+        attempts.append(1)
+        raise DesktopUnavailable("Accessibility permission not granted")
+
+    monkeypatch.setattr(app_module, "open_desktop", refused)
+    _app, controller = make_controller(monkeypatch)
+    try:
+        controller.desktop_context()
+        controller.desktop_context()
+        assert attempts == [1]  # not retried at every request...
+        controller._desktop_retry_at = 0.0  # ...but after a while (the permission granted)
+        controller.desktop_context()
+        assert attempts == [1, 1]
+    finally:
+        controller.shutdown()

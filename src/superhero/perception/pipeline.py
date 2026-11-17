@@ -22,7 +22,7 @@ from fovea.events import GazePoint
 from fovea.webcam.calibration import CalibrationIdentity, CalibrationTarget
 from fovea.webcam.capture import CaptureClosed, CaptureSession, FrameCapture
 from fovea.webcam.engine import GazeEngine, GazeSettings
-from fovea.webcam.features import estimate_head_pose
+from fovea.webcam.features import estimate_head_pose, face_width
 from fovea.webcam.frame_processor import GazeFrameProcessor
 from fovea.webcam.landmarks import FaceLandmarkEstimator
 from fovea.webcam.model import download_face_landmarker
@@ -49,8 +49,14 @@ class PipelineStatus:
     detail: str = ""
 
 
-def calibration_targets(points: int) -> tuple[CalibrationTarget, ...]:
-    """5-, 9- or 13-point layouts in display-normalized coordinates."""
+def calibration_targets(
+    points: int, display: Display | None = None
+) -> tuple[CalibrationTarget, ...]:
+    """5-, 9- or 13-point layouts in display-normalized coordinates.
+
+    On a combined display, every monitor gets the layout, so each target is on a screen
+    (the bounding box can have gaps) and every monitor is covered.
+    """
     lo, mid, hi = 0.08, 0.5, 0.92
     corners = [(lo, lo), (hi, lo), (lo, hi), (hi, hi)]
     edges = [(mid, lo), (lo, mid), (hi, mid), (mid, hi)]
@@ -60,7 +66,38 @@ def calibration_targets(points: int) -> tuple[CalibrationTarget, ...]:
         layout += edges
     if points >= 13:
         layout += inner
-    return tuple(CalibrationTarget(f"p{i}", x, y) for i, (x, y) in enumerate(layout))
+    if display is None or not display.parts:
+        return tuple(CalibrationTarget(f"p{i}", x, y) for i, (x, y) in enumerate(layout))
+    targets = []
+    for part in display.parts:
+        for x, y in layout:
+            gx, gy = display.normalize(*part.logical_point(x, y))
+            targets.append(CalibrationTarget(f"p{len(targets)}", gx, gy))
+    return tuple(targets)
+
+
+def face_placement(landmarks: Sequence[Any], width: float, height: float) -> tuple[str, str]:
+    """For the 478 MediaPipe face landmarks: advice on the face's place in the frame, and a level (ok | warn).
+
+    Webcam gaze is most accurate with the face large, centred and turned to the screen,
+    which in practice means the camera at the top centre of the screen, at arm's length.
+    """
+    if len(landmarks) <= 454:  # not the full face mesh: nothing reliable to say
+        return "Face found; position unknown", "idle"
+    size = face_width(landmarks) * width / min(width, height)  # share of the shorter side
+    # Cheek to cheek and forehead to chin, the face-oval landmarks Fovea measures width by.
+    cx = (landmarks[234].x + landmarks[454].x) / 2
+    cy = (landmarks[10].y + landmarks[152].y) / 2
+    yaw, _pitch, _roll = estimate_head_pose(landmarks, width, height)
+    if size < 0.18:
+        return "Too far: move closer to the camera", "warn"
+    if size > 0.7:
+        return "Too close: sit back a little", "warn"
+    if abs(cx - 0.5) > 0.22 or abs(cy - 0.5) > 0.28:
+        return "Off centre: put the camera at the top centre of the screen", "warn"
+    if abs(yaw) > 20:
+        return "Turned away: face the screen", "warn"
+    return "Good: centred and at a good distance", "ok"
 
 
 def gaze_settings(config: Config, display: Display) -> GazeSettings:
@@ -72,7 +109,7 @@ def gaze_settings(config: Config, display: Display) -> GazeSettings:
         wink_max_ms=g.wink_max_ms,
         double_blink_ms=g.double_blink_ms,
         long_blink_ms=g.long_blink_ms,
-        calibration_path=calibration_path(display.name, config.camera.index),
+        calibration_path=calibration_path(display.identity, config.camera.index),
         debug=False,
     )
 
@@ -127,7 +164,7 @@ class Pipeline:
             self._thread.join(timeout=5)
 
     def calibrate(self, points: int) -> None:
-        targets = calibration_targets(points)
+        targets = calibration_targets(points, self._display)
         self._commands.put(lambda engine: engine.start_calibration(targets))
 
     def test_accuracy(self) -> None:
@@ -220,7 +257,7 @@ class Pipeline:
         width = getattr(cam, "actual_width", config.camera.width)
         height = getattr(cam, "actual_height", config.camera.height)
         identity = CalibrationIdentity(
-            display_id=self._display.name,
+            display_id=self._display.identity,
             display_width=self._display.width,
             display_height=self._display.height,
             camera_index=config.camera.index,
@@ -301,6 +338,10 @@ class Pipeline:
                     events = [e for e in events if not isinstance(e, GazePoint)]
                 jaw_open = None if observation is None else (blendshapes or {}).get("jawopen", 0.0)
                 self.signals["jaw_open"] = jaw_open
+                if diag_due:  # twice a second is enough for a readout
+                    self.signals["face"] = (
+                        None if landmarks is None else face_placement(landmarks, float(w), float(h))
+                    )
                 if observation is None or landmarks is None or jaw_open is None:
                     mouth.reset()
                     head.reset()

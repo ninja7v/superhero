@@ -63,6 +63,8 @@ from PySide6.QtWidgets import (
 from superhero import config as cfg
 from superhero.interaction.commands import spec_problem
 from superhero.perception.camera import list_cameras
+from superhero.platform.accessibility import snapping_problem
+from superhero.platform.displays import ALL_DISPLAYS
 from superhero.ui.overlay import contrast_color, paint_pointer
 
 if TYPE_CHECKING:
@@ -99,7 +101,7 @@ SWATCHES = ("auto", "#ff2d2d", "#22e0ff", "#39ff88", "#ffb020", "#ff3df0")
 STATUS_GROUPS = {
     "Tracking": ("Camera", "Tracking", "Pointer latency", "Calibration"),
     "Desktop": ("Desktop control", "Emergency shortcut"),
-    "Live signals": ("Last gesture", "Mouth opening", "Hand"),
+    "Live signals": ("Face position", "Last gesture", "Mouth opening", "Hand"),
 }
 
 RESOLUTIONS = {
@@ -824,6 +826,8 @@ class Panel(QMainWindow):
             d.name: f"{d.name}  ·  {d.width}×{d.height}".strip(" ·")  # noqa: RUF001 - a real multiplication sign
             for d in self.c.displays
         }
+        if len(self.c.displays) > 1:
+            displays[ALL_DISPLAYS] = "All displays together"
 
         def pick_display(name: str) -> None:
             config.active_display = name
@@ -1000,6 +1004,19 @@ class Panel(QMainWindow):
             "The system cursor follows your gaze as well as the laser.",
         )  # fmt: skip
 
+        self._section("Clicks")
+        self._toggle(
+            pointer, "snap", "Snap to buttons and links",
+            "A click near a button, link or field lands on it, because gaze is a little off.",
+        )  # fmt: skip
+        self._slider(pointer, "snap_radius", "Snap distance", 1, lambda v: f"{v:.0f} px")
+        problem = snapping_problem()
+        self._hint(
+            problem
+            or "Uses the accessibility information applications publish. Apps that publish "
+            "none get ordinary clicks."
+        )
+
     def _voice(self) -> None:
         voice = self.c.config.voice
         self._section("Recognition")
@@ -1101,13 +1118,17 @@ class Panel(QMainWindow):
         server = QLabel(f"{ai.url}  ·  {where}")
         server.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._field("Server", server)
+        self._toggle(
+            ai, "share_windows", "Tell the model which windows are open",
+            "App names and window titles go with each request, so it can pick the right app.",
+        )  # fmt: skip
 
         self._section("How to use it")
         self._hint(
             f"In voice mode, say “{ai.wake_word}, …” — for example “{ai.wake_word}, open "
             "Firefox and search for the weather in Paris”. The model proposes a few keystrokes "
             "and clicks; they appear at the top of the screen and nothing happens until you wink "
-            "or say “yes”. It cannot see your screen or read your files, and it takes several "
+            "or say “yes”. It cannot see what is inside windows or read your files, and it takes several "
             "seconds."
         )
         self._hint(

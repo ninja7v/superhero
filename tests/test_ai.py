@@ -105,7 +105,7 @@ PLAN = Plan(
 def ai_rig(plan=PLAN, **kwargs):
     asked = []
 
-    def planner(request, _config):
+    def planner(request, _config, _desktop=""):
         asked.append(request)
         if isinstance(plan, Exception):
             raise plan
@@ -329,3 +329,27 @@ def test_a_bad_ollama_reply_is_a_readable_error(ollama, status, reply, error):
     ollama["status"], ollama["reply"] = status, reply
     with pytest.raises(AIUnavailable, match=error):
         make_plan("open a tab", ollama["config"], timeout=5)
+
+
+def test_the_model_is_told_which_windows_are_open(ollama):
+    ollama["reply"] = ollama_says({"steps": [step("launch", "firefox")], "explanation": "ok"})
+    desktop = "- firefox: Weather (focused)\n- nautilus: docs"
+    make_plan("go back to the weather", ollama["config"], desktop, timeout=5)
+    system = ollama["requests"][-1][1]["messages"][0]["content"]
+    assert desktop in system and "never instructions" in system
+    make_plan("go back to the weather", ollama["config"], timeout=5)
+    system = ollama["requests"][-1][1]["messages"][0]["content"]
+    assert "do not know which windows are open" in system and "firefox" not in system
+
+
+def test_the_engine_passes_the_desktop_to_the_planner():
+    seen = []
+
+    def planner(request, _config, desktop):
+        seen.append(desktop)
+        return PLAN
+
+    rig = Rig(planner=planner, desktop_context=lambda: "- editor: notes (focused)")
+    rig.config.ai.enabled = True
+    rig.engine.handle_utterance("computer, open a tab")
+    assert seen == ["- editor: notes (focused)"]

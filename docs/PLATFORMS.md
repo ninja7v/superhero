@@ -57,4 +57,7 @@ package it contains. It is about 0.9 GB and does not include the speech model.
    Then talk normally and yawn: voice mode should not start.
 7. Enable hand tracking. Do pinch, two fingers, open palm and fist fire only when you mean them?
 8. Press Ctrl+Alt+Esc while another app has focus.
-9. Quit and restart. Are settings, calibration and permissions remembered?
+9. `doctor` lists your windows under *Accessibility*. Turn on *Snap to buttons and links* and
+   wink just beside a button: the click should land on it. With two monitors, pick *All displays
+   together*, calibrate, and check that the laser and clicks cross between screens.
+10. Quit and restart. Are settings, calibration and permissions remembered?

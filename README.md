@@ -13,13 +13,15 @@ desktop, mouse and keyboard keep working as they do now.
 ## Features
 
 - **Gaze laser pointer**: drawn above all windows, and clicks pass through it.
-- **Calibration** with 5, 9 or 13 points, plus an accuracy test.
+- **Calibration** with 5, 9 or 13 points, plus an accuracy test. Use one monitor or all of them.
+- **Click snapping** (optional): a click near a button or link lands on it.
 - **Gestures you assign to actions**: winks, blinks, dwell, mouth open, head tilt or nod, and
   hand poses. Actions include click, right click, double click, drag, scroll, voice and pause.
 - **Local voice**: dictation, plus commands like "copy", "scroll down" or "switch to Firefox".
   You can add your own.
 - **AI commands** (optional, local through Ollama): "computer, open Firefox and search for…".
-  The plan is shown on screen and runs only after you confirm it.
+  The model knows which windows are open. The plan is shown on screen and runs only after you
+  confirm it.
 - **Safety**: control starts off and needs a calibration. Ctrl+Alt+Esc stops everything.
 - **Private**: no frames or audio are stored or uploaded, and there is no telemetry.
 
@@ -47,6 +49,7 @@ offline. On Wayland, run `uv run superhero install-desktop` once so the emergenc
 | Frame rate well under 30 | Add light on your face. |
 | *Desktop control: Unavailable* | Approve the system dialog (Wayland), or grant Accessibility (macOS). |
 | Gestures do nothing | Check *Live signals* on the Home page. |
+| The laser is far from where you look | Check *Face position* on the Home page, then recalibrate. |
 | Settings were reset | The profile that could not be read is saved next to it as `<name>.json.bad`. |
 
 ## What to expect

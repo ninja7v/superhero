@@ -24,6 +24,8 @@ dependencies = [
   "platformdirs>=4.3,<5",
   "pynput>=1.7.7,<2",
   "jeepney>=0.8,<1; sys_platform == 'linux'",
+  # UI Automation, for snapping clicks to buttons (MIT).
+  "comtypes>=1.4,<2; sys_platform == 'win32'",
 ]
 
 # A dependency group (not an extra) so plain `uv sync` / `uv run` include the dev tools.

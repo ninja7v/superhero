@@ -37,16 +37,22 @@ class CalibrationWindow(QWidget):
     test_requested = Signal()
     finished = Signal()
 
-    def __init__(self, display: Display) -> None:
+    def __init__(self, display: Display, region: Display | None = None) -> None:
+        """Covers ``region``, one monitor of ``display`` (all of it by default). Targets
+        are placed in ``display``'s coordinates, so one window per monitor of a combined
+        display together show every target. Text goes on the primary monitor only."""
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setCursor(Qt.CursorShape.BlankCursor)
         self._display = display
+        self._region = region or display
+        self._texts = region is None or region.primary or not any(p.primary for p in display.parts)
         self._cue: CalibrationCue | None = None
         self._headline = "Follow the dot with your eyes. Keep your head still."
         self._detail = "Press Esc to cancel"
         self._done = False
-        self.setGeometry(display.x, display.y, display.width, display.height)
+        r = self._region
+        self.setGeometry(r.x, r.y, r.width, r.height)
 
     def on_event(self, event: object) -> None:
         if isinstance(event, CalibrationCue):
@@ -93,19 +99,22 @@ class CalibrationWindow(QWidget):
         painter.setPen(QColor("#f4f5f7"))
         centre = self.rect().adjusted(0, self.height() // 3, 0, 0)
         top = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
-        if self._cue is None or self._done:
+        if self._texts and (self._cue is None or self._done):
             painter.drawText(centre, top, self._headline)
         font.setPointSize(12)
         font.setWeight(QFont.Weight.Normal)
         painter.setFont(font)
         painter.setPen(QColor("#9aa3b2"))
-        painter.drawText(
-            centre.adjusted(0, 56 if self._cue is None else 0, 0, 0), top, self._detail
-        )
+        if self._texts:
+            painter.drawText(
+                centre.adjusted(0, 56 if self._cue is None else 0, 0, 0), top, self._detail
+            )
 
         cue = self._cue
         if cue is not None:
-            pos = QPointF(cue.x * (self.width() - 1), cue.y * (self.height() - 1))
+            gx, gy = self._display.logical_point(cue.x, cue.y)
+            pos = QPointF(gx - self._region.x, gy - self._region.y)
+        if cue is not None and self.rect().contains(pos.toPoint()):
             progress = min(1.0, cue.samples / cue.needed) if cue.needed else 0.0
             painter.setPen(QPen(QColor("#22e0ff"), 3))
             painter.setBrush(Qt.BrushStyle.NoBrush)

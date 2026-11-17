@@ -48,6 +48,8 @@ something per platform (a shortcut, a prompt), its tests must force each platfor
 | Portal consent, restore token, GlobalShortcuts | manual | manual | – | – |
 | Accessibility, camera, microphone permissions | – | – | – | manual |
 | Clicks and typing into real apps | manual | manual | manual | manual |
+| Snapping logic, window descriptions | CI, fake tree | CI, fake tree | CI, fake tree | CI, fake tree |
+| Window list, element under a point | manual | window list manual | manual | manual |
 | Bundle builds and starts (`doctor`) | CI | (same bundle) | CI | CI |
 
 CI runners have no camera, microphone, compositor or user, so a green run shows that the code

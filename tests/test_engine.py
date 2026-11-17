@@ -316,3 +316,65 @@ def test_unknown_keys_never_reach_the_backend():
     assert notices and "unknown key 'hyper'" in notices[0]
     assert rig.engine.run_command(Command("key", "Ctrl + C"))
     assert rig.input.calls == [("keys", "ctrl+c")]
+
+
+def test_emergency_stop_interrupts_a_launch_and_is_not_kept_waiting():
+    """A launch pauses between steps; the stop must not wait for it, nor let it continue."""
+    import threading
+
+    paused, resume = threading.Event(), threading.Event()
+
+    def sleep(_seconds):
+        paused.set()
+        resume.wait(5)
+
+    rig = Rig(sleep=sleep)
+    worker = threading.Thread(target=rig.engine.run_command, args=(Command("launch", "firefox"),))
+    worker.start()
+    assert paused.wait(5)  # the launcher has opened; the launch is pausing
+    stopped = threading.Event()
+    threading.Thread(target=lambda: (rig.engine.emergency_stop(), stopped.set())).start()
+    assert stopped.wait(1), "the emergency stop waited for the launch"
+    resume.set()
+    worker.join(5)
+    assert [c[0] for c in rig.input.calls] == ["keys"]  # nothing typed after the stop
+
+
+def test_clicks_on_a_combined_display_land_on_the_monitor_under_the_gaze():
+    main = Display("main", 0, 0, 1920, 1080, primary=True)
+    right = Display("right", 1920, 0, 1280, 1024)
+    both = Display.combined([main, right])
+    rig = Rig()
+    rig.engine.display = both
+    moved = []
+    rig.input.move = lambda display, nx, ny: moved.append((display.name, nx, ny))
+    rig.look(*both.normalize(1920 + 640, 512))
+    rig.wink()
+    assert moved and moved[0][0] == "right"
+    assert moved[0][1:] == pytest.approx((0.5, 0.5), abs=1e-3)
+
+
+def test_snapping_moves_the_click_only_when_enabled():
+    asked = []
+
+    def snap(display, nx, ny):
+        asked.append((nx, ny))
+        return (0.25, 0.25)
+
+    rig = Rig(snap=snap)
+    rig.look(0.5, 0.5)
+    rig.wink()
+    assert asked == [] and rig.input.calls[0] == ("move", 960, 540)
+    rig.config.pointer.snap = True
+    rig.now += 1
+    rig.look(0.5, 0.5)
+    rig.wink()
+    assert asked == [(0.5, 0.5)] and ("move", 480, 270) in rig.input.calls
+
+
+def test_no_snap_target_keeps_the_click_where_the_user_looks():
+    rig = Rig(snap=lambda display, nx, ny: None)
+    rig.config.pointer.snap = True
+    rig.look(0.5, 0.5)
+    rig.wink()
+    assert rig.input.calls[0] == ("move", 960, 540)

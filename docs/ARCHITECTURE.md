@@ -30,6 +30,7 @@ One Python process with two long-lived threads, and data flowing one way.
 | Desktop input | `platform/`, behind the `InputBackend` protocol |
 | Voice | `voice/` |
 | AI commands | `ai/planner.py` proposes a plan; the engine confirms and runs it |
+| Open windows, click snapping | `platform/accessibility.py` (AT-SPI, AX, UI Automation) |
 
 **Why Python.** Fovea, the gaze engine, is written in Python, and running it in the same process
 gives the gesture detectors the landmarks for free. The real per-frame work is native code
@@ -73,6 +74,9 @@ The engine is plain Python with no Qt, so it can be tested thoroughly.
   disarms.
 - Switching camera, resolution or display loads that combination's own calibration. If it has
   none, control is turned off. Changing the monitor layout also turns control off.
+- A launch or plan checks the stop between steps, and never holds the engine's lock while it
+  waits, so the emergency stop takes effect at once.
+- Permission that arrives during a calibration arms control only when it closes.
 - Key chords are always released, even on error. Invalid key names are rejected before anything
   is pressed.
 - Gestures are muted during calibration.
@@ -85,9 +89,26 @@ each platform's units. On Wayland, the RemoteDesktop portal is used, with a rest
 readable only by the user. The permission prompts are the operating system's own. When a
 capability is refused, the Home page says so and everything else keeps working.
 
+## Several monitors
+
+*All displays together* treats every monitor as one display: its bounding box. Gaze is
+normalized to that box and calibrated with the chosen layout on each monitor, so no target falls
+in a gap between screens of different sizes. `Display.locate` finds the monitor under a point;
+input, the overlay and the calibration window all work per monitor. The calibration belongs to
+the arrangement, so moving a monitor needs a new one.
+
+## Accessibility
+
+`platform/accessibility.py` only reads. It lists the open windows (app and title) for AI
+requests, and finds the button, link or field under a point. With snapping on, a click probes
+the gaze point and two rings around it, within *Snap distance* and 80 ms, and lands just inside
+the nearest actionable element. A point already on one is kept. On Linux only the focused
+window is searched. Wayland gives no window positions, so snapping is off there. Apps that
+publish no accessibility information get ordinary clicks.
+
 ## Overlay
 
-A frameless, translucent, click-through window covers the active display. Each update repaints
+A frameless, translucent, click-through window covers each monitor of the active display. Each update repaints
 only the pointer's area. The pointer has a light and a dark outline, so it stays visible on any
 background. Where the OS allows it, its colour adapts to what is behind it.
 
@@ -102,7 +123,8 @@ shortcuts, so apps still ask about unsaved work.
 ## AI commands
 
 Off by default. An utterance that starts with "computer" and isn't a built-in command is sent to
-a local Ollama model. The plan it returns must pass strict checks: only `key`, `type`, `launch`,
+a local Ollama model, with the list of open windows unless that is turned off. Window titles are
+marked as data, not instructions, and the plan is still validated and confirmed. The plan it returns must pass strict checks: only `key`, `type`, `launch`,
 `scroll`, `click` and `wait` steps, known key names, and at most ten steps. The model has no
 tools and cannot access the desktop. The plan is shown for twelve seconds and runs only after a
 click gesture or "yes". By default, servers on other machines are refused.
@@ -118,6 +140,7 @@ silently overwritten. Calibrations are stored separately, one per display and ca
 
 - Camera frames and audio stay in memory only, and are discarded.
 - The network is used only to download the models on first use (all checksum-verified) and, if
-  AI commands are on, to reach the local Ollama server. There is no telemetry.
+  AI commands are on, to reach the local Ollama server. Window titles go only to that server.
+  There is no telemetry.
 - The overlay and the tray icon show when the camera is in use and when the microphone is
   listening.

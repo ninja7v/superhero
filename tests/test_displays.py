@@ -1,6 +1,6 @@
 import pytest
 
-from superhero.platform.displays import Display, pick_display
+from superhero.platform.displays import ALL_DISPLAYS, Display, pick_display
 
 MAIN = Display("main", 0, 0, 1920, 1080, primary=True, width_mm=600, height_mm=340)
 LEFT = Display("left", -1280, 56, 1280, 1024)  # left of the primary: negative origin
@@ -57,3 +57,54 @@ def test_pick_display_falls_back_to_primary():
     assert pick_display([LEFT], "") is LEFT
     with pytest.raises(ValueError):
         pick_display([], "")
+
+
+# -- several monitors used as one -------------------------------------------------------------
+
+# A 1920x1080 primary with a smaller monitor to its right, lower: the bounding box has a gap.
+RIGHT = Display("right", 1920, 200, 1280, 1024)
+BOTH = Display.combined([RIGHT, MAIN])
+
+
+def test_combined_display_spans_every_monitor():
+    assert (BOTH.x, BOTH.y, BOTH.width, BOTH.height) == (0, 0, 3200, 1224)
+    assert BOTH.parts == (MAIN, RIGHT)  # left to right
+    assert BOTH.name == ALL_DISPLAYS
+
+
+def test_a_point_is_located_on_the_monitor_under_it():
+    part, x, y = BOTH.locate(*BOTH.normalize(960, 540))
+    assert part is MAIN and (x, y) == pytest.approx((0.5, 0.5), abs=1e-3)
+    part, x, y = BOTH.locate(*BOTH.normalize(1920 + 640, 200 + 512))
+    assert part is RIGHT and (x, y) == pytest.approx((0.5, 0.5), abs=1e-3)
+
+
+def test_a_point_in_a_gap_goes_to_the_nearest_monitor_edge():
+    part, _x, y = BOTH.locate(*BOTH.normalize(2500, 50))  # above the right monitor
+    assert part is RIGHT and y == 0.0
+    part, _x, y = BOTH.locate(*BOTH.normalize(900, 1200))  # below the primary
+    assert part is MAIN and y == 1.0
+
+
+def test_native_point_of_a_combined_display_uses_that_monitor_scale():
+    both = Display.combined([MAIN, HIDPI])
+    assert both.native_point(*both.normalize(1920 + 640, 400), "win32") == HIDPI.native_point(
+        0.5, 0.5, "win32"
+    )
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32", "linux"])
+def test_from_native_inverts_native_point(platform):
+    for nx, ny in ((0.0, 0.0), (0.5, 0.25), (1.0, 1.0)):
+        lx, ly = HIDPI.from_native(*HIDPI.native_point(nx, ny, platform), platform)
+        assert (lx, ly) == pytest.approx(HIDPI.logical_point(nx, ny), abs=1)
+
+
+def test_calibration_identity_changes_when_monitors_are_rearranged():
+    moved = Display.combined([MAIN, Display("right", 1920, 0, 1280, 1024)])
+    assert BOTH.identity != moved.identity and MAIN.identity == "main"
+
+
+def test_all_displays_is_picked_only_when_there_are_several():
+    assert pick_display([MAIN, RIGHT], ALL_DISPLAYS) == BOTH
+    assert pick_display([MAIN], ALL_DISPLAYS) is MAIN

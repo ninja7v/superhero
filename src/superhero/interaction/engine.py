@@ -53,7 +53,9 @@ class InteractionEngine:
         on_voice_arm: Callable[[bool], None] = lambda armed: None,
         on_change: Callable[[], None] = lambda: None,
         on_notice: Callable[[str], None] = lambda text: None,
-        planner: Callable[[str, AIConfig], Plan] = make_plan,
+        planner: Callable[[str, AIConfig, str], Plan] = make_plan,
+        desktop_context: Callable[[], str] = lambda: "",
+        snap: Callable[[Display, float, float], tuple[float, float] | None] = lambda d, x, y: None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -71,6 +73,8 @@ class InteractionEngine:
         self._on_change = on_change
         self._on_notice = on_notice
         self._planner = planner
+        self._desktop_context = desktop_context
+        self._snap = snap
         self._pending: Plan | None = None
         self._pending_until = 0.0
         self._clock = clock
@@ -134,7 +138,7 @@ class InteractionEngine:
         self._pointer_at = self._clock()
         if self.armed and (self.dragging or self.config.pointer.move_system_cursor):
             with self._lock:
-                self._inject(lambda backend: backend.move(self.display, event.x, event.y))
+                self._inject(lambda backend: self._move(backend, event.x, event.y))
 
     def _on_fixation(self, event: Fixation) -> None:
         if event.duration_ms < self._dwell_last_ms:
@@ -196,9 +200,12 @@ class InteractionEngine:
         if self.pointer is None or not fresh or self.tracking is TrackingStatus.LOST:
             return False
         nx, ny = self.pointer
+        if self.config.pointer.snap:
+            # Gaze is off by a few degrees; the nearest button or link is the likely target.
+            nx, ny = self._snap(self.display, nx, ny) or (nx, ny)
 
         def run(backend: InputBackend) -> None:
-            backend.move(self.display, nx, ny)
+            self._move(backend, nx, ny)
             if action == "drag_toggle":
                 backend.button("left", True)
                 self.dragging = True
@@ -209,6 +216,11 @@ class InteractionEngine:
                 backend.button(button, False)
 
         return self._inject(run)
+
+    def _move(self, backend: InputBackend, nx: float, ny: float) -> None:
+        """Move the system pointer; on a combined display, onto the monitor under the point."""
+        display, x, y = self.display.locate(nx, ny)
+        backend.move(display, x, y)
 
     def _release_drag(self) -> bool:
         if not self.dragging:
@@ -236,6 +248,8 @@ class InteractionEngine:
             return self.perform(command.value)
         if not self.armed or command.kind in ("unsupported", "stop", "invalid"):
             return False
+        if command.kind == "launch":
+            return self._launch(command.value)
         with self._lock:
             if command.kind == "key":
                 try:
@@ -249,8 +263,6 @@ class InteractionEngine:
             if command.kind == "scroll":
                 lines = self.config.gestures.scroll_lines * 2
                 return self._inject(lambda b: b.scroll(lines if command.value == "up" else -lines))
-            if command.kind == "launch":
-                return self._launch(command.value)
         return False
 
     def _launch(self, name: str) -> bool:
@@ -262,8 +274,11 @@ class InteractionEngine:
             lambda b: b.keys(["enter"]),
         ]
         for step in steps:
-            if not self._inject(step):
-                return False
+            # The lock is not held across the pause, so the emergency stop is never kept
+            # waiting, and once it has run no further step is typed.
+            with self._lock:
+                if not self.armed or not self._inject(step):
+                    return False
             self._sleep(_LAUNCH_STEP_S)
         return True
 
@@ -322,7 +337,7 @@ class InteractionEngine:
         if not request.strip():
             return "Say what you want after the wake word"
         try:
-            plan = self._planner(request, self.config.ai)
+            plan = self._planner(request, self.config.ai, self._desktop_context())
         except AIUnavailable as exc:
             return str(exc)
         if not plan.steps:

@@ -18,22 +18,23 @@ by automated tests, but has not been tried with a real camera, person or desktop
 | Head and hand gestures | Built | Hand thresholds still need tuning on live hands |
 | AI commands | Built, off by default | Never run by voice on a real desktop |
 | Emergency stop | Built | Wayland needs `superhero install-desktop` |
+| Several monitors as one | Built | Calibration window on each monitor; never run on two real screens |
+| Click snapping to buttons and links | Built, off by default | Checked against a real X11 (XWayland) window. Not available on Wayland |
+| AI commands know the open windows | Built | Window list checked on GNOME Wayland; never run by voice |
+| Face position guidance | Built | Live readout on the Home page; thresholds need a real person |
 | Windows and macOS | Built | Never run. See [PLATFORMS.md](PLATFORMS.md) |
 | Pen "wand" | Experiment | See [PEN_POC.md](PEN_POC.md) |
 
 ## Not built yet
 
-- Gaze across several monitors (the laser works on one chosen display)
-- Snapping to UI elements using the accessibility tree
-- Giving AI commands knowledge of the screen and windows
+- AI commands that see inside windows (only app names and window titles are shared)
 - Installers, code signing, auto-update
 
 ## Next steps
 
-1. **Improve gaze accuracy.** Measure at 1280x720, then tune calibration sampling, filter out
-   uncertain frames, and add camera placement guidance.
+1. **Improve gaze accuracy.** Measure at 1280x720 with the face position readout showing
+   *Good*, then tune calibration sampling and filter out uncertain frames.
 2. Tune the mouth and hand gestures using the live readouts on the Home page.
 3. Get Windows and macOS working in CI, then run the
    [bring-up checklist](PLATFORMS.md#bring-up-checklist) on each.
-4. Support several monitors.
-5. Snap to UI elements, and give AI commands context, using the accessibility tree.
+4. Try *All displays together* on two monitors, and snapping on X11, Windows and macOS.

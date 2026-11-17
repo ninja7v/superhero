@@ -315,3 +315,45 @@ def test_an_unexpected_error_restarts_tracking_instead_of_ending_it(rig, monkeyp
     assert sink.wait_for(lambda: any(s.state == "model_error" for s in sink.of(PipelineStatus)))
     seen = len(sink.of(GazePoint))
     assert sink.wait_for(lambda: len(sink.of(GazePoint)) > seen + 5)
+
+
+def test_a_combined_display_gets_targets_on_every_monitor():
+    main = Display("main", 0, 0, 1920, 1080, primary=True)
+    right = Display("right", 1920, 200, 1280, 1024)
+    both = Display.combined([main, right])
+    targets = calibration_targets(5, both)
+    assert len(targets) == 10 and len({t.label for t in targets}) == 10
+    for target in targets:  # each one is on a screen, never in the gap of the bounding box
+        part, x, y = both.locate(target.x, target.y)
+        assert both.normalize(*part.logical_point(x, y)) == pytest.approx((target.x, target.y))
+    on_right = [t for t in targets if both.locate(t.x, t.y)[0] is right]
+    assert len(on_right) == 5
+
+
+def test_face_placement_advice():
+    from types import SimpleNamespace
+
+    from superhero.perception.pipeline import face_placement
+
+    face = FRAMES[0].landmarks
+    text, level = face_placement(face, 640, 480)
+    assert level in ("ok", "warn") and text
+
+    def scaled(factor, dx=0.0):  # shrink or move the recorded face around the frame centre
+        return [
+            SimpleNamespace(x=0.5 + (p.x - 0.5) * factor + dx, y=0.5 + (p.y - 0.5) * factor, z=p.z)
+            for p in face
+        ]
+
+    assert face_placement(scaled(0.2), 640, 480)[0].startswith("Too far")
+    assert face_placement(scaled(1.0, dx=0.35), 640, 480)[0].startswith("Off centre")
+
+
+def test_the_pipeline_reports_face_position(rig):
+    pipeline, _config, _camera, sink = rig
+    pipeline.start()
+    assert sink.wait_for(lambda: pipeline.signals.get("face") is not None)
+    text, level = pipeline.signals["face"]
+    assert text and level in ("ok", "warn")
+    ReplayEstimator.face_visible = False
+    assert sink.wait_for(lambda: pipeline.signals.get("face", 0) is None)

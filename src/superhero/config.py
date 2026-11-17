@@ -96,6 +96,10 @@ class PointerConfig:
     smoothing_beta: float = 0.02
     min_confidence: float = 0.35
     move_system_cursor: bool = False
+    # Clicks go to the nearest button, link or field within snap_radius (logical pixels),
+    # found through the accessibility tree.
+    snap: bool = False
+    snap_radius: int = 48
 
 
 @dataclass
@@ -151,6 +155,7 @@ class AIConfig:
     model: str = ""
     wake_word: str = "computer"  # requests starting with this word go to the AI
     allow_remote: bool = False  # explicit consent to send requests to another machine
+    share_windows: bool = True  # tell the model which windows are open (names and titles)
 
 
 @dataclass
@@ -162,7 +167,7 @@ class Config:
     gestures: GestureConfig = field(default_factory=GestureConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     ai: AIConfig = field(default_factory=AIConfig)
-    active_display: str = ""  # display name; empty = primary
+    active_display: str = ""  # display name; empty = primary; "*" = all displays together
     calibration_points: int = 9
     emergency_hotkey: str = "ctrl+alt+escape"
 
@@ -181,7 +186,7 @@ RANGES: dict[type, dict[str, tuple[float, float]]] = {
     CameraConfig: {"index": (0, 63), "width": (160, 3840), "height": (120, 2160), "fps": (10, 120)},
     PointerConfig: {
         "size": (3, 40), "smoothing_mincutoff": (0.2, 5.0), "smoothing_beta": (0.0, 0.5),
-        "min_confidence": (0.0, 1.0),
+        "min_confidence": (0.0, 1.0), "snap_radius": (8, 200),
     },
     GestureConfig: {
         "cooldown_ms": (0, 3000), "dwell_ms": (300, 5000), "wink_min_ms": (50, 500),

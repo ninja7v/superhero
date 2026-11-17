@@ -13,6 +13,7 @@ import shutil
 import statistics
 import sys
 import threading
+import time
 from pathlib import Path
 
 from fovea.events import CalibrationCue, CalibrationDone, Diagnostics, GazePoint, GazeTestDone
@@ -32,20 +33,29 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from superhero import config as cfg
 from superhero.interaction.engine import InteractionEngine
 from superhero.perception.pipeline import Pipeline, PipelineStatus
+from superhero.platform.accessibility import (
+    Desktop,
+    DesktopUnavailable,
+    describe_windows,
+    open_desktop,
+    snap_point,
+)
 from superhero.platform.base import (
     APP_ID,
     create_input_backend,
     desktop_entry_path,
     session_type,
 )
-from superhero.platform.displays import detect_displays, pick_display
+from superhero.platform.displays import Display, detect_displays, pick_display
 from superhero.platform.hotkey import register_hotkey
 from superhero.ui.calibration import CalibrationWindow, describe_error, quality_label
-from superhero.ui.overlay import Overlay
+from superhero.ui.overlay import Overlays
 from superhero.ui.panel import Panel
 from superhero.voice.session import VoiceSession
 
 log = logging.getLogger("superhero")
+
+_DESKTOP_RETRY_S = 30.0
 
 _PIPELINE_TEXT = {
     "starting": "Starting…",
@@ -71,6 +81,7 @@ class Controller(QObject):
     voice_toggle_requested = Signal()
     voice_arm_requested = Signal(bool)
     notice = Signal(str)
+    engine_changed = Signal()
 
     def __init__(
         self, profile: str, camera: object | None = None, *, global_hotkey: bool = True
@@ -83,19 +94,26 @@ class Controller(QObject):
         self._camera_override = camera
         self.displays = detect_displays()
         self.display = pick_display(self.displays, self.config.active_display)
-        self.overlay = Overlay(self.config.pointer, self.display)
+        self.overlay = Overlays(self.config.pointer, self.display)
         self.engine = InteractionEngine(
             self.config,
             self.display,
             on_voice_toggle=self.voice_toggle_requested.emit,
             on_voice_arm=self.voice_arm_requested.emit,
+            on_change=self.engine_changed.emit,
             on_notice=self.notice.emit,
+            desktop_context=self.desktop_context,
+            snap=self.snap,
         )
+        # The accessibility reader, opened on first use from whichever thread needs it.
+        self._desktop: Desktop | None = None
+        self._desktop_retry_at = 0.0  # after a failure (say, a permission not yet granted)
+        self._desktop_lock = threading.Lock()
         self.pipeline: Pipeline | None = None
         # Events still queued from a pipeline that has been replaced are dropped by this.
         self._generation = 0
         self._opening_input = False
-        self._calibration: CalibrationWindow | None = None
+        self._calibration: list[CalibrationWindow] | None = None  # one per monitor
         self._hotkey = None
         self._want_armed = False
         self.quitting = False
@@ -121,6 +139,7 @@ class Controller(QObject):
         self.hotkey_ready.connect(self._on_hotkey_ready)
         self.stop_requested.connect(self.emergency_stop)
         self.notice.connect(self._set_flash)
+        self.engine_changed.connect(self._on_engine_changed)
         self.voice_toggle_requested.connect(lambda: self.voice.toggle())
         self.voice_arm_requested.connect(lambda armed: self.voice.arm(armed))
 
@@ -177,6 +196,10 @@ class Controller(QObject):
             self.engine.input.close()
         if self._hotkey is not None:
             self._hotkey.stop()
+        with self._desktop_lock:
+            if self._desktop is not None:
+                self._desktop.close()
+                self._desktop = None
 
     def _build_tray(self) -> None:
         pixmap = QPixmap(64, 64)
@@ -236,7 +259,15 @@ class Controller(QObject):
         else:
             self.engine.input = backend  # type: ignore[assignment]
             self._input_text = f"Ready ({backend.name})"  # type: ignore[attr-defined]
-        self.engine.set_armed(self._want_armed)
+        # Permission can arrive while a calibration is open; closing it arms instead.
+        self.engine.set_armed(self._want_armed and self._calibration is None)
+
+    def _on_engine_changed(self) -> None:
+        """The engine can switch control off (an injection error) or toggle it (the pause
+        gesture or command). Remember that, so closing a calibration restores what the
+        user last chose rather than an older choice."""
+        if self._calibration is None and not self._opening_input:
+            self._want_armed = self.engine.armed
 
     def emergency_stop(self) -> None:
         self._want_armed = False
@@ -325,18 +356,27 @@ class Controller(QObject):
         self.pipeline.test_accuracy()
 
     def _open_calibration(self) -> None:
-        self.engine.set_armed(False)  # no gestures become clicks while calibrating
         if self._calibration is None:
-            window = self._calibration = CalibrationWindow(self.display)
-            window.cancelled.connect(lambda: (self._close_calibration(), self.restart_pipeline()))
-            window.finished.connect(self._close_calibration)
-            window.test_requested.connect(lambda: self.pipeline and self.pipeline.test_accuracy())
-            window.showFullScreen()
-            window.activateWindow()
+            regions = list(self.display.parts) or [None]
+            self._calibration = [CalibrationWindow(self.display, region) for region in regions]
+            for window in self._calibration:
+                window.cancelled.connect(
+                    lambda: (self._close_calibration(), self.restart_pipeline())
+                )
+                window.finished.connect(self._close_calibration)
+                window.test_requested.connect(
+                    lambda: self.pipeline and self.pipeline.test_accuracy()
+                )
+                window.showFullScreen()
+            main = next((w for w in self._calibration if w._texts), self._calibration[0])
+            main.activateWindow()
+        # After the windows exist, so this is not taken as the user's choice to stop.
+        self.engine.set_armed(False)  # no gestures become clicks while calibrating
 
     def _close_calibration(self) -> None:
         if self._calibration is not None:
-            self._calibration.close()
+            for window in self._calibration:
+                window.close()
             self._calibration = None
         self.engine.set_armed(self._want_armed)
 
@@ -351,8 +391,44 @@ class Controller(QObject):
                 f"{quality_label(event.median_error)}. Measured median error "
                 f"{describe_error(event.median_error, self.display)}."
             )
-        if self._calibration is not None:
-            self._calibration.on_event(event)
+        for window in self._calibration or ():
+            window.on_event(event)
+
+    # -- desktop accessibility -------------------------------------------------------------
+
+    def _open_desktop(self) -> Desktop | None:
+        with self._desktop_lock:
+            if self._desktop is None and time.monotonic() >= self._desktop_retry_at:
+                try:
+                    self._desktop = open_desktop()
+                except DesktopUnavailable as exc:
+                    log.info("accessibility unavailable: %s", exc)
+                    # Not at every click: the next try is in half a minute.
+                    self._desktop_retry_at = time.monotonic() + _DESKTOP_RETRY_S
+            return self._desktop
+
+    def desktop_context(self) -> str:
+        """The open windows, for an AI request (speech thread). Empty if not shared."""
+        if not self.config.ai.share_windows:
+            return ""
+        desktop = self._open_desktop()
+        try:
+            return describe_windows(desktop.windows()) if desktop is not None else ""
+        except Exception:
+            log.warning("could not list windows", exc_info=True)
+            return ""
+
+    def snap(self, display: Display, nx: float, ny: float) -> tuple[float, float] | None:
+        """Where a click should land instead, from the accessibility tree (engine lock held)."""
+        desktop = self._open_desktop()
+        if desktop is None or not desktop.can_locate:
+            return None
+        try:
+            radius = self.config.pointer.snap_radius
+            return snap_point(desktop.element_at, display, nx, ny, radius)
+        except Exception:
+            log.warning("snapping failed; clicking where you look", exc_info=True)
+            return None
 
     # -- voice ------------------------------------------------------------------------
 
@@ -522,7 +598,8 @@ class Controller(QObject):
         """Live detector inputs, so a gesture that will not fire can be diagnosed by eye."""
         signals = self.pipeline.signals if self.pipeline is not None else {}
         tracking, gestures = self.config.tracking, self.config.gestures
-        rows = []
+        face = signals.get("face")
+        rows = [("Face position", *face) if face else ("Face position", "No face in view", "idle")]
         if tracking.mouth:
             jaw = signals.get("jaw_open")
             bound = cfg.ACTIONS.get(gestures.bindings.get("mouth_open", "none"), "")

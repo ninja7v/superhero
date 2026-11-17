@@ -23,7 +23,7 @@ credited next to the file and in `NOTICE`.
 | pynput, python-xlib | **LGPL** | Input on Windows, macOS and X11 |
 | faster-whisper, CTranslate2, ONNX Runtime | MIT | Speech recognition |
 | Whisper model (downloaded) | MIT | Speech recognition |
-| jeepney, platformdirs | MIT | D-Bus, file paths |
+| jeepney, platformdirs, comtypes (Windows) | MIT | D-Bus, file paths, UI Automation |
 | NumPy | BSD-3-Clause | Maths |
 | certifi, tqdm | MPL-2.0 | Indirect dependencies |
 | Ollama and its models (optional, installed by you) | MIT; each model has its own licence | AI commands |

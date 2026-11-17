@@ -209,3 +209,78 @@ class Overlay(QWidget):
         painter.drawRoundedRect(pill, 17, 17)
         painter.setPen(QColor(255, 255, 255))
         painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, self._status)
+
+
+class Overlays:
+    """One overlay per monitor of the active display, so the laser can cross them.
+
+    A single window spanning several monitors is unreliable: macOS shows a window on one
+    display only, and Windows scales it by one monitor's DPI. ``set_pointer`` takes a point
+    normalized to the whole (possibly combined) display and draws it on the monitor under it.
+    Status text goes on the primary monitor.
+    """
+
+    def __init__(self, config: PointerConfig, display: Display) -> None:
+        self._config = config
+        self._display = display
+        self._children: list[Overlay] = []
+        self._active: Overlay | None = None
+        self._shown = False
+        self.latencies_ms: deque[float] = deque(maxlen=300)
+        self.set_display(display)
+
+    @property
+    def can_sample(self) -> bool:
+        return all(child.can_sample for child in self._children)
+
+    def set_display(self, display: Display) -> None:
+        parts = list(display.parts) or [display]
+        self._display = display
+        if [c._display for c in self._children] == parts:
+            return
+        for child in self._children:
+            child.close()
+            child.deleteLater()
+        self._children = []
+        for part in parts:
+            child = Overlay(self._config, part)
+            child.latencies_ms = self.latencies_ms  # one latency record for the laser
+            if self._shown:
+                child.show()
+            self._children.append(child)
+        self._active = None
+
+    def _status_child(self) -> Overlay:
+        return next((c for c in self._children if c._display.primary), self._children[0])
+
+    def show(self) -> None:
+        self._shown = True
+        for child in self._children:
+            child.show()
+
+    def isVisible(self) -> bool:  # the QWidget name, so callers need not know
+        return any(child.isVisible() for child in self._children)
+
+    def update(self) -> None:
+        for child in self._children:
+            child.update()
+
+    def set_pointer(
+        self, point: tuple[float, float] | None, visible: bool, captured_ns: int | None = None
+    ) -> None:
+        if point is None or len(self._children) == 1:
+            target, local = self._children[0] if point is not None else self._active, point
+        else:
+            part, x, y = self._display.locate(*point)
+            target = next(c for c in self._children if c._display == part)
+            local = (x, y)
+        if self._active is not None and self._active is not target:
+            self._active.set_pointer(None, False)  # the laser left that monitor
+        if target is not None:
+            target.set_pointer(local, visible, captured_ns)
+            self._active = target
+
+    def set_status(self, text: str, tracking_on: bool) -> None:
+        status = self._status_child()
+        for child in self._children:
+            child.set_status(text if child is status else "", tracking_on)
