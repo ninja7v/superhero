@@ -2,6 +2,8 @@
 
 **Look to point. Wink to click. Speak to command.**
 
+![An illustration of SUPERHERO: a red laser follows the eyes, a wink clicks, and a spoken request opens a YouTube search](docs/assets/demo.gif)
+
 Laser in your eyes, magic in your wand, and the force is with you.
 SUPERHERO lets you control your computer with an ordinary webcam and microphone. A laser dot
 follows your eyes, face and hand gestures click, and your voice types and runs commands. Your
@@ -19,9 +21,11 @@ desktop, mouse and keyboard keep working as they do now.
   hand poses. Actions include click, right click, double click, drag, scroll, voice and pause.
 - **Local voice**: dictation, plus commands like "copy", "scroll down" or "switch to Firefox".
   You can add your own.
-- **AI commands** (optional, local through Ollama): "computer, open Firefox and search for…".
-  The model knows which windows are open. The plan is shown on screen and runs only after you
-  confirm it.
+- **AI commands** (optional, local through Ollama): "computer, search YouTube for relaxing
+  music" or "computer, write a new email". The model knows the open windows and the buttons and
+  links of the focused one, so it can open web pages, launch apps and press controls by name.
+  The plan is shown on screen and runs after you confirm it (or at once, if it closes, deletes
+  and sends nothing and you chose that). Built-in commands skip the model.
 - **Safety**: control starts off and needs a calibration. Ctrl+Alt+Esc stops everything.
 - **Private**: no frames or audio are stored or uploaded, and there is no telemetry.
 
@@ -40,7 +44,8 @@ uv run superhero
 4. Look at something and wink. To speak, hold your mouth open for a second.
 
 On first use, SUPERHERO downloads the face model and the speech model. After that it works
-offline. `uv run superhero doctor` shows what your machine supports.
+offline. *Launch on start* on the Home page opens SUPERHERO when you log in.
+`uv run superhero doctor` shows what your machine supports.
 
 | Problem | Fix |
 |---|---|
