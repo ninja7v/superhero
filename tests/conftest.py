@@ -38,6 +38,9 @@ def isolated_dirs(tmp_path, monkeypatch):
     """Never touch the real profile or calibration directories from tests."""
     monkeypatch.setenv("SUPERHERO_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SUPERHERO_DATA_DIR", str(tmp_path / "data"))
+    # Desktop entries and launch at login (platform/launcher.py) live under these.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
 
 
 def _refuse(what):

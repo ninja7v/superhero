@@ -62,7 +62,9 @@ def test_documentation_only_runs_nothing():
         ("src/superhero/ui/overlay.py", {"test_app"}, ALL_OS),
         ("src/superhero/ui/panel.py", {"test_app"}, ALL_OS),
         # command line: doctor, bench, install-desktop
-        ("src/superhero/app.py", {"test_app", "test_platform"}, ALL_OS),
+        ("src/superhero/app.py", {"test_app"}, ALL_OS),
+        # how SUPERHERO is started: install-desktop and launch at login
+        ("src/superhero/platform/launcher.py", {"test_platform", "test_app"}, ALL_OS),
         ("src/superhero/doctor.py", {"test_app"}, ALL_OS),
         # a shared type almost everything uses
         (

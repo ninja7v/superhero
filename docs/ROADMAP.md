@@ -22,6 +22,7 @@ by automated tests, but has not been tried with a real camera, person or desktop
 | Click snapping to buttons and links | Built, off by default | Checked against a real X11 (XWayland) window. Not available on Wayland |
 | AI commands know the open windows | Built | Window list checked on GNOME Wayland; never run by voice |
 | AI commands press buttons and links by name | Built | Linux only. Listing and pressing checked on a Qt window on GNOME Wayland |
+| Launch on start | Built | Linux autostart entry tested; macOS and Windows never run |
 | Face position guidance | Built | Live readout on the Home page; thresholds need a real person |
 | Windows and macOS | Built | Never run. See [PLATFORMS.md](PLATFORMS.md) |
 | Pen "wand" | Experiment | See [PEN_POC.md](PEN_POC.md) |

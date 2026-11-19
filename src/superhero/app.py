@@ -9,12 +9,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import shutil
 import statistics
 import sys
 import threading
 import time
-from pathlib import Path
 
 from fovea.events import CalibrationCue, CalibrationDone, Diagnostics, GazePoint, GazeTestDone
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -44,11 +42,11 @@ from superhero.platform.accessibility import (
 from superhero.platform.base import (
     APP_ID,
     create_input_backend,
-    desktop_entry_path,
     session_type,
 )
 from superhero.platform.displays import Display, detect_displays, pick_display
 from superhero.platform.hotkey import register_hotkey
+from superhero.platform.launcher import install_desktop_entry
 from superhero.ui.calibration import CalibrationWindow, describe_error, quality_label
 from superhero.ui.overlay import Overlays
 from superhero.ui.panel import Panel
@@ -693,42 +691,6 @@ class Controller(QObject):
         else:
             rows.append(("Hand", "Off — turn on hand tracking under Tracking", "idle"))
         return rows
-
-
-def launch_command() -> list[str]:
-    """The command that starts this installation of SUPERHERO."""
-    if getattr(sys, "frozen", False):  # a packaged bundle: the executable is the app
-        return [sys.executable]
-    script = shutil.which("superhero")
-    return [script] if script else [sys.executable, "-m", "superhero"]
-
-
-def desktop_exec(command: list[str]) -> str:
-    """Quote a command for a desktop entry's ``Exec`` key (Desktop Entry spec, "Exec key")."""
-
-    def quote(arg: str) -> str:
-        if not any(c in arg for c in " \t\n\"'\\><~|&;$*?#()`"):
-            return arg
-        escaped = "".join("\\" + c if c in '"`$\\' else c for c in arg)
-        return f'"{escaped}"'
-
-    # Then the string-level escaping, which the spec undoes before the quoting above: a
-    # backslash is doubled, and a literal percent sign is doubled so it is not a field code.
-    return " ".join(quote(arg).replace("\\", "\\\\").replace("%", "%%") for arg in command)
-
-
-def install_desktop_entry() -> Path:
-    """Install the launcher entry the Wayland global-shortcut portal identifies us by."""
-    path = desktop_entry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "[Desktop Entry]\nType=Application\nName=SUPERHERO\n"
-        "Comment=Control your computer with your eyes, face and voice\n"
-        f"Exec={desktop_exec(launch_command())}\nTerminal=false\n"
-        "Categories=Utility;Accessibility;\n",
-        encoding="utf-8",
-    )
-    return path
 
 
 def bench(image_path: str, seconds: float) -> int:

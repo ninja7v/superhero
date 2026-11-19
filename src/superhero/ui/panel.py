@@ -66,6 +66,7 @@ from superhero.interaction.commands import spec_problem
 from superhero.perception.camera import list_cameras
 from superhero.platform.accessibility import snapping_problem
 from superhero.platform.displays import ALL_DISPLAYS
+from superhero.platform.launcher import autostart_enabled, launch_command, set_autostart
 from superhero.ui.overlay import contrast_color, paint_pointer
 
 if TYPE_CHECKING:
@@ -758,6 +759,28 @@ class Panel(QMainWindow):
                 dot, text_label, row = self._status_line()
                 self._status_rows[label] = (dot, text_label)
                 self._field(label, row)
+        self._section("Startup")
+        startup = ToggleRow(
+            "Launch on start",
+            "Open SUPERHERO when you log in to this computer. Control still starts off.",
+            autostart_enabled(),
+        )
+
+        def launch_on_start(on: bool) -> None:
+            if on == autostart_enabled():
+                return  # already so (or the switch being put back after a failure)
+            command = launch_command()
+            if self.c.profile != cfg.DEFAULT_PROFILE:
+                command += ["--profile", self.c.profile]
+            try:
+                set_autostart(on, command)
+            except OSError as exc:
+                startup.switch.setChecked(autostart_enabled())
+                QMessageBox.warning(self, "Launch on start", f"That could not be changed:\n{exc}")
+
+        startup.switch.toggled.connect(launch_on_start)
+        self._wide(startup)
+
         hotkey = self.c.config.emergency_hotkey.replace("+", " + ").title()
         where = (
             "the tray icon, or the button above" if self.c.tray_available else "the button above"

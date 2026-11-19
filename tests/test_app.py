@@ -464,6 +464,27 @@ def test_an_unavailable_desktop_reader_is_retried_later(monkeypatch):
         controller.shutdown()
 
 
+def test_launch_on_start_writes_the_login_entry_for_this_profile(monkeypatch):
+    from superhero.platform import launcher
+    from superhero.ui.panel import Switch
+
+    _app, controller = make_controller(monkeypatch)
+    try:
+        switch = next(
+            s
+            for s in controller.panel.findChildren(Switch)
+            if s.accessibleName() == "Launch on start"
+        )
+        assert not switch.isChecked() and not launcher.autostart_enabled()
+        switch.click()
+        assert launcher.autostart_enabled()
+        assert "--profile test" in launcher.autostart_path().read_text()  # not the default one
+        switch.click()
+        assert not launcher.autostart_enabled()
+    finally:
+        controller.shutdown()
+
+
 def test_a_request_typed_in_the_panel_is_planned_but_not_run(monkeypatch):
     from superhero import app as app_module
     from superhero.ai.planner import Plan

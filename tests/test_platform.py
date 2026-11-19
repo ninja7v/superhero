@@ -90,7 +90,7 @@ def test_restore_token_is_private(tmp_path):
 
 
 def test_desktop_entry_exec_is_quoted_per_the_spec():
-    from superhero.app import desktop_exec
+    from superhero.platform.launcher import desktop_exec
 
     assert desktop_exec(["/usr/bin/superhero"]) == "/usr/bin/superhero"
     assert (
@@ -102,22 +102,54 @@ def test_desktop_entry_exec_is_quoted_per_the_spec():
 
 
 def test_packaged_build_launches_its_own_executable(monkeypatch):
-    from superhero import app
+    from superhero.platform import launcher
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", "/opt/superhero/superhero")
-    assert app.launch_command() == ["/opt/superhero/superhero"]
+    assert launcher.launch_command() == ["/opt/superhero/superhero"]
     monkeypatch.delattr(sys, "frozen")
-    monkeypatch.setattr(app.shutil, "which", lambda _name: None)
-    assert app.launch_command() == ["/opt/superhero/superhero", "-m", "superhero"]
+    monkeypatch.setattr(launcher.shutil, "which", lambda _name: None)
+    assert launcher.launch_command() == ["/opt/superhero/superhero", "-m", "superhero"]
 
 
 def test_install_desktop_writes_the_entry_the_portal_looks_for(tmp_path, monkeypatch):
-    from superhero.app import install_desktop_entry
     from superhero.platform.base import APP_ID, desktop_entry_path
+    from superhero.platform.launcher import install_desktop_entry
 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     path = install_desktop_entry()
     assert path == desktop_entry_path() == tmp_path / "applications" / f"{APP_ID}.desktop"
     text = path.read_text()
     assert text.startswith("[Desktop Entry]\n") and "\nExec=" in text
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_launch_on_start_is_recorded_where_the_system_looks(tmp_path, monkeypatch, platform):
+    import plistlib
+
+    from superhero.platform import launcher
+
+    monkeypatch.setattr(launcher.Path, "home", lambda: tmp_path)
+    command = ["/opt/super hero/superhero", "--profile", "work"]
+    assert not launcher.autostart_enabled(platform)
+    launcher.set_autostart(True, command, platform)
+    path = launcher.autostart_path(platform)
+    assert launcher.autostart_enabled(platform) and path.is_file()
+    if platform == "darwin":
+        agent = plistlib.loads(path.read_bytes())
+        assert agent["ProgramArguments"] == command and agent["RunAtLoad"] is True
+    else:
+        assert path.parent.name == "autostart"
+        assert 'Exec="/opt/super hero/superhero" --profile work\n' in path.read_text()
+    launcher.set_autostart(False, command, platform)
+    assert not path.exists() and not launcher.autostart_enabled(platform)
+    launcher.set_autostart(False, command, platform)  # turning it off twice is fine
+
+
+def test_an_autostart_entry_switched_off_in_the_desktop_settings_reads_as_off():
+    from superhero.platform import launcher
+
+    launcher.set_autostart(True, ["superhero"], "linux")
+    path = launcher.autostart_path("linux")
+    path.write_text(path.read_text().replace("enabled=true", "enabled=false"))
+    assert not launcher.autostart_enabled("linux")
