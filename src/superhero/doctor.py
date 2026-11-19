@@ -61,7 +61,7 @@ def _hotkey() -> str:
 
     if session_type() == "wayland":
         installed = desktop_entry_path().is_file()
-        return "ready" if installed else "needs `superhero install-desktop` once"
+        return "ready" if installed else "desktop entry installed at the next start"
     if sys.platform == "darwin":
         return "needs the Input Monitoring permission (macOS asks on first use)"
     return "available"

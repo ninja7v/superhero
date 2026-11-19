@@ -42,6 +42,7 @@ from superhero.platform.accessibility import (
 from superhero.platform.base import (
     APP_ID,
     create_input_backend,
+    desktop_entry_path,
     session_type,
 )
 from superhero.platform.displays import Display, detect_displays, pick_display
@@ -278,12 +279,14 @@ class Controller(QObject):
     def emergency_stop(self) -> None:
         self._want_armed = False
         self.engine.emergency_stop()
-        if self.voice.state == "listening":
-            self.voice.toggle()
+        self.voice.close()  # what was being said is dropped, not transcribed and acted on
         self._set_flash("Control stopped")
 
     def _register_hotkey(self) -> None:
         try:
+            if session_type() == "wayland" and not desktop_entry_path().is_file():
+                # The shortcut portal identifies SUPERHERO by its desktop entry.
+                install_desktop_entry()
             hotkey = register_hotkey(self.config.emergency_hotkey, self.stop_requested.emit)
             self.hotkey_ready.emit(hotkey, "")
         except Exception as exc:

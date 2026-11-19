@@ -17,7 +17,7 @@ by automated tests, but has not been tried with a real camera, person or desktop
 | Dictation and voice commands | Built | Speech recognition checked on a recording |
 | Head and hand gestures | Built | Hand thresholds still need tuning on live hands |
 | AI commands | Built, off by default | Planned with gemma4 (8B) on CPU: 2 to 4.5 s warm. Never run by voice on a real desktop |
-| Emergency stop | Built | Wayland needs `superhero install-desktop` |
+| Emergency stop | Built | On Wayland the desktop entry it needs is installed at start |
 | Several monitors as one | Built | Calibration window on each monitor; never run on two real screens |
 | Click snapping to buttons and links | Built, off by default | Checked against a real X11 (XWayland) window. Not available on Wayland |
 | AI commands know the open windows | Built | Window list checked on GNOME Wayland; never run by voice |

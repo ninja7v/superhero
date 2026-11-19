@@ -40,8 +40,7 @@ uv run superhero
 4. Look at something and wink. To speak, hold your mouth open for a second.
 
 On first use, SUPERHERO downloads the face model and the speech model. After that it works
-offline. On Wayland, run `uv run superhero install-desktop` once so the emergency shortcut works.
-`uv run superhero doctor` shows what your machine supports.
+offline. `uv run superhero doctor` shows what your machine supports.
 
 | Problem | Fix |
 |---|---|

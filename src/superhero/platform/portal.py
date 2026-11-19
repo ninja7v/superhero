@@ -132,8 +132,8 @@ class _Portal:
         )
         if reply.header.message_type is MessageType.error:
             raise InputUnavailable(
-                "The global shortcut needs SUPERHERO's desktop entry. "
-                "Run `superhero install-desktop` once, then restart."
+                "The global shortcut needs SUPERHERO's desktop entry, which has just been "
+                "installed. Restart SUPERHERO; if this persists, log out and back in."
             )
 
     def create_session(self, interface: str) -> str:

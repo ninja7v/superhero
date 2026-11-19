@@ -20,7 +20,7 @@ and models, and changes nothing.
 |---|---|---|---|---|
 | Input | `SendInput` (pynput) | Quartz (pynput) | XTest (pynput) | RemoteDesktop portal |
 | Permission | None (blocked for admin windows) | Accessibility, plus Input Monitoring for the shortcut | None | Consent dialog, remembered |
-| Emergency shortcut | pynput | pynput | pynput | GlobalShortcuts portal (needs `install-desktop`) |
+| Emergency shortcut | pynput | pynput | pynput | GlobalShortcuts portal (desktop entry installed at start) |
 | Pointer units | Native pixels per monitor | Points | Scaled pixels | Relative to the monitor stream |
 
 ## Known limitations
