@@ -95,6 +95,7 @@ class VoiceSession(QObject):
         """Pre-open the microphone while the activation gesture is in progress."""
         if self.state == "idle" and armed and self._open():
             self._chunks.clear()
+            self._transcriber.preload()  # ready by the time the user has spoken
             self._set_state("armed")
             self._disarm.start()
         elif self.state == "armed" and not armed:
@@ -107,6 +108,7 @@ class VoiceSession(QObject):
             if not self._open():
                 return
             self._disarm.stop()
+            self._transcriber.preload()
             self._keep_prebuffer()
             self._endpointer = Endpointer(self._config.silence_timeout_s, self._config.max_seconds)
             self._set_state("listening")

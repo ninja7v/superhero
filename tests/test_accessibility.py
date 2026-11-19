@@ -172,3 +172,94 @@ def test_a_click_does_not_wait_for_a_window_listing():
     listing.join()  # the lock is now held, as during a slow windows() call
     result, seconds = elapsed(lambda: reader.element_at(100, 100))
     assert result is None and seconds < accessibility._PROBE_BUDGET_S + 0.05
+
+
+def test_controls_are_matched_by_name_ignoring_case_and_spacing():
+    from superhero.platform.accessibility import match_control
+
+    controls = [("Reply all", 1), ("Reply", 2), ("Search  mail", 3), ("Write", 4)]
+    assert match_control(controls, "reply") == 2  # exact beats a longer name
+    assert match_control(controls, "search mail") == 3
+    assert match_control(controls, "Wri") == 4  # then a prefix
+    assert match_control(controls, "mail") == 3  # then a part
+    assert match_control(controls, "Delete") is None and match_control(controls, " ") is None
+
+
+def test_the_desktop_is_described_windows_then_controls():
+    from superhero.platform.accessibility import Control, describe_desktop
+
+    text = describe_desktop(
+        [Window("mail", "Inbox", focused=True)], [Control("push button", 'Say "hi"')]
+    )
+    assert text == (
+        "Open windows, the focused one first:\n- mail: Inbox (focused)\n\n"
+        "Controls in the focused window:\n- \"Say 'hi'\" (push button)"
+    )
+    assert describe_desktop([], []) == ""
+
+
+class FakeTree(accessibility.AtspiDesktop):
+    """An AT-SPI reader over an in-memory tree: path -> (role, name, states, children)."""
+
+    SHOWN = 1 << 25 | 1 << 24  # showing, sensitive
+
+    def __init__(self, nodes, actions=True):
+        import threading
+
+        self.nodes, self.actions, self.done = nodes, actions, []
+        self._lock, self.can_locate, self._deadline = threading.Lock(), False, None
+        self._active = (float("-inf"), [])
+
+    def _toplevels(self):
+        return [("mail", ("app", "/win"), 1 << 1 | self.SHOWN)]
+
+    def _states(self, ref):
+        return self.nodes[ref[1]][2]
+
+    def _name(self, ref):
+        return self.nodes[ref[1]][1]
+
+    def _children(self, ref):
+        return [("app", child) for child in self.nodes[ref[1]][3]]
+
+    def _call(self, ref, interface, method, signature=None, body=()):
+        if method == "GetRoleName":
+            return (self.nodes[ref[1]][0],)
+        if method == "DoAction" and not self.actions:
+            raise accessibility.DesktopUnavailable("no Action interface")
+        self.done.append((method, ref[1]))
+        return (True,)
+
+
+TREE = {
+    "/win": ("frame", "Inbox", FakeTree.SHOWN, ["/bar", "/menu", "/search"]),
+    "/bar": ("tool bar", "", FakeTree.SHOWN, ["/write", "/greyed"]),
+    "/write": ("push button", "Write", FakeTree.SHOWN, []),
+    "/greyed": ("push button", "Undo", 1 << 25, []),  # showing but not sensitive
+    "/menu": ("menu", "File", 0, ["/quit"]),  # a closed menu: nothing inside is listed
+    "/quit": ("menu item", "Quit", FakeTree.SHOWN, []),
+    "/search": ("text", "Search", FakeTree.SHOWN, []),
+}
+
+
+def test_the_focused_windows_showing_enabled_controls_are_listed():
+    from superhero.platform.accessibility import Control
+
+    assert FakeTree(TREE).controls() == [Control("text", "Search"), Control("push button", "Write")]
+
+
+def test_pressing_a_control_uses_its_action_or_else_focuses_it():
+    reader = FakeTree(TREE)
+    assert reader.press("write") and reader.done == [("DoAction", "/write")]
+    fields = FakeTree(TREE, actions=False)
+    assert fields.press("Search") and fields.done == [("GrabFocus", "/search")]
+    assert not reader.press("Quit")  # inside a closed menu
+    assert not reader.press("Undo")  # disabled
+
+
+def test_a_hung_application_bounds_reading_and_pressing_controls():
+    reader = hung_reader()
+    result, seconds = elapsed(reader.controls)
+    assert result == [] and seconds < accessibility._CONTROLS_BUDGET_S + 0.3
+    result, seconds = elapsed(lambda: reader.press("Send"))
+    assert result is False and seconds < accessibility._PRESS_BUDGET_S + 0.3

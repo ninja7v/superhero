@@ -31,12 +31,13 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from superhero import config as cfg
+from superhero.ai.planner import AIUnavailable, make_plan, warm_up
 from superhero.interaction.engine import InteractionEngine
 from superhero.perception.pipeline import Pipeline, PipelineStatus
 from superhero.platform.accessibility import (
     Desktop,
     DesktopUnavailable,
-    describe_windows,
+    describe_desktop,
     open_desktop,
     snap_point,
 )
@@ -56,6 +57,7 @@ from superhero.voice.session import VoiceSession
 log = logging.getLogger("superhero")
 
 _DESKTOP_RETRY_S = 30.0
+_CONTEXT_FRESH_S = 20.0  # the desktop read while the user spoke serves the request after
 
 _PIPELINE_TEXT = {
     "starting": "Starting…",
@@ -82,6 +84,7 @@ class Controller(QObject):
     voice_arm_requested = Signal(bool)
     notice = Signal(str)
     engine_changed = Signal()
+    ai_tried = Signal(str)  # the plan, or why there is none, for a request typed in the panel
 
     def __init__(
         self, profile: str, camera: object | None = None, *, global_hotkey: bool = True
@@ -103,12 +106,15 @@ class Controller(QObject):
             on_change=self.engine_changed.emit,
             on_notice=self.notice.emit,
             desktop_context=self.desktop_context,
+            press=self.press_control,
             snap=self.snap,
         )
         # The accessibility reader, opened on first use from whichever thread needs it.
         self._desktop: Desktop | None = None
         self._desktop_retry_at = 0.0  # after a failure (say, a permission not yet granted)
         self._desktop_lock = threading.Lock()
+        self._context: tuple[float, str] | None = None  # read ahead while the user speaks
+        self._preparing = threading.Lock()
         self.pipeline: Pipeline | None = None
         # Events still queued from a pipeline that has been replaced are dropped by this.
         self._generation = 0
@@ -140,6 +146,7 @@ class Controller(QObject):
         self.stop_requested.connect(self.emergency_stop)
         self.notice.connect(self._set_flash)
         self.engine_changed.connect(self._on_engine_changed)
+        self.engine_changed.connect(self._update_overlay_status)
         self.voice_toggle_requested.connect(lambda: self.voice.toggle())
         self.voice_arm_requested.connect(lambda armed: self.voice.arm(armed))
 
@@ -163,6 +170,7 @@ class Controller(QObject):
         self.overlay.show()
         self.panel.show()
         self.restart_pipeline()
+        self.warm_ai()
 
     def restart_pipeline(self) -> None:
         if self.pipeline is not None:
@@ -407,16 +415,71 @@ class Controller(QObject):
                     self._desktop_retry_at = time.monotonic() + _DESKTOP_RETRY_S
             return self._desktop
 
-    def desktop_context(self) -> str:
-        """The open windows, for an AI request (speech thread). Empty if not shared."""
+    def _read_desktop(self) -> str:
+        """The open windows and the focused one's controls, as told to the AI."""
         if not self.config.ai.share_windows:
             return ""
         desktop = self._open_desktop()
-        try:
-            return describe_windows(desktop.windows()) if desktop is not None else ""
-        except Exception:
-            log.warning("could not list windows", exc_info=True)
+        if desktop is None:
             return ""
+        try:
+            return describe_desktop(desktop.windows(), desktop.controls())
+        except Exception:
+            log.warning("could not read the desktop", exc_info=True)
+            return ""
+
+    def desktop_context(self) -> str:
+        """The desktop for an AI request (speech thread). Empty if not shared.
+
+        Read once ahead, while the user was still speaking, when that is recent enough.
+        """
+        cached, self._context = self._context, None
+        if cached is not None and time.monotonic() - cached[0] <= _CONTEXT_FRESH_S:
+            return cached[1]
+        return self._read_desktop()
+
+    def prepare_ai(self) -> None:
+        """The user started to speak: read the desktop and load the model meanwhile, so the
+        request is answered as soon as it is recognised."""
+        if not self.config.ai.enabled or not self._preparing.acquire(blocking=False):
+            return
+
+        def run() -> None:
+            try:
+                self._context = (time.monotonic(), self._read_desktop())
+                warm_up(self.config.ai)
+            finally:
+                self._preparing.release()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def warm_ai(self) -> None:
+        """Load the AI model in the background, if AI commands are on."""
+        if self.config.ai.enabled and self.config.ai.model:
+            threading.Thread(target=warm_up, args=(self.config.ai,), daemon=True).start()
+
+    def try_ai(self, request: str) -> None:
+        """Plan a request typed in the panel and report the plan, without running it."""
+
+        def run() -> None:
+            try:
+                plan = make_plan(request, self.config.ai, self._read_desktop())
+                text = (
+                    f"{plan.explanation}\n{plan.summary()}"
+                    + ("\n⚠ It closes, deletes or sends something." if plan.risky else "")
+                    if plan.steps
+                    else plan.explanation or "The AI could not plan that."
+                )
+            except AIUnavailable as exc:
+                text = str(exc)
+            self.ai_tried.emit(text)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def press_control(self, name: str) -> bool:
+        """Activate the focused window's control called ``name`` (an AI plan's step)."""
+        desktop = self._open_desktop()
+        return desktop is not None and desktop.press(name)
 
     def snap(self, display: Display, nx: float, ny: float) -> tuple[float, float] | None:
         """Where a click should land instead, from the accessibility tree (engine lock held)."""
@@ -437,10 +500,15 @@ class Controller(QObject):
         if old is not None:
             old.close()  # an open microphone must not outlive its session
         self.voice = VoiceSession(self.config.voice, self.engine.handle_utterance)
-        self.voice.state_changed.connect(lambda _state: self._update_overlay_status())
+        self.voice.state_changed.connect(self._on_voice_state)
         self.voice.result.connect(
             lambda text, outcome: self._set_flash(f"{outcome}: “{text}”" if text else outcome)
         )
+
+    def _on_voice_state(self, state: str) -> None:
+        if state in ("armed", "listening"):
+            self.prepare_ai()
+        self._update_overlay_status()
 
     def _set_flash(self, text: str) -> None:
         self._flash = text
@@ -449,10 +517,13 @@ class Controller(QObject):
         self._update_overlay_status()
 
     def _update_overlay_status(self) -> None:
-        if self.voice.state == "error":
+        state = self.voice.state
+        if state == "error":
             text = "No microphone available"
-        else:
-            text = _VOICE_TEXT.get(self.voice.state) or self.engine.pending_text or self._flash
+        elif state == "listening":
+            text = _VOICE_TEXT[state]
+        else:  # the AI thinking or awaiting a yes, which happens while "transcribing"
+            text = self.engine.pending_text or _VOICE_TEXT.get(state) or self._flash
         self.overlay.set_status(text, self._pipeline_state.state == "running")
 
     # -- displays -------------------------------------------------------------------------

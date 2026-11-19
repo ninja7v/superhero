@@ -1,12 +1,16 @@
-"""What is on the desktop: the open windows, and the button or link under a point.
+"""What is on the desktop: the open windows, their controls, and the element under a point.
 
-AI commands are told which windows are open, and clicks can snap to the nearest
-actionable element, since gaze from a webcam is a few degrees off. Each platform has
-its own accessibility API: AT-SPI on Linux, the AX API on macOS, UI Automation on
-Windows. Nothing here clicks or changes anything; it only reads.
+AI commands are told which windows are open and which buttons, links and fields the
+focused one has, and clicks can snap to the nearest actionable element, since gaze
+from a webcam is a few degrees off. Each platform has its own accessibility API:
+AT-SPI on Linux, the AX API on macOS, UI Automation on Windows. Everything here only
+reads, except :meth:`Desktop.press`, which a confirmed AI plan uses to activate a
+control by name.
 
 Wayland does not tell clients where windows are, so there AT-SPI knows the windows
-but not where their elements are on screen, and snapping is unavailable.
+and their controls but not where those are on screen, and snapping is unavailable.
+Pressing a control by name needs no position, so it works on Wayland too. Listing and
+pressing controls is implemented for AT-SPI only so far.
 """
 
 from __future__ import annotations
@@ -29,6 +33,10 @@ _CALL_TIMEOUT_S = 0.25  # listing windows (for AI requests, off the UI thread)
 _PROBE_BUDGET_S = 0.06
 _WINDOWS_BUDGET_S = 0.15  # re-reading which window has focus, at most twice a second
 SNAP_BUDGET_S = 0.08
+_CONTROLS_BUDGET_S = 0.6  # reading the focused window's controls for an AI request
+_PRESS_BUDGET_S = 1.0
+_MAX_CONTROLS = 60
+_MAX_NODES = 1500
 
 
 class DesktopUnavailable(RuntimeError):
@@ -66,11 +74,25 @@ class Element:
         )
 
 
+@dataclass(frozen=True)
+class Control:
+    """A named, actionable control of the focused window."""
+
+    role: str
+    name: str
+
+
 class Desktop(Protocol):
     can_locate: bool  # whether element_at can work at all in this session
 
     def windows(self) -> list[Window]:
         """Open, visible windows; the focused one is marked."""
+
+    def controls(self) -> list[Control]:
+        """Named buttons, links, fields and the like in the focused window, outermost first."""
+
+    def press(self, name: str) -> bool:
+        """Activate the focused window's control called ``name``; False if none was found."""
 
     def element_at(self, x: float, y: float) -> Element | None:
         """The actionable element at a native screen point, or None."""
@@ -98,6 +120,40 @@ def describe_windows(windows: list[Window], limit: int = 15, title_chars: int = 
         line = f"- {window.app}" + (f": {title}" if title and title != window.app else "")
         lines.append(line + (" (focused)" if window.focused else ""))
     return "\n".join(lines)
+
+
+def describe_controls(controls: list[Control], name_chars: int = 60) -> str:
+    """One line per control, for the AI's prompt: ``- "Send" (push button)``."""
+    lines = []
+    for control in controls:
+        name = " ".join(control.name.split())[:name_chars].replace('"', "'")
+        lines.append(f'- "{name}" ({control.role})')
+    return "\n".join(lines)
+
+
+def describe_desktop(windows: list[Window], controls: list[Control]) -> str:
+    """What the AI is told about the desktop: the open windows, then the focused one's
+    controls. Empty when nothing is known."""
+    parts = []
+    if windows:
+        parts.append("Open windows, the focused one first:\n" + describe_windows(windows))
+    if controls:
+        parts.append("Controls in the focused window:\n" + describe_controls(controls))
+    return "\n\n".join(parts)
+
+
+def match_control[T](controls: list[tuple[str, T]], name: str) -> T | None:
+    """The control called ``name``: an exact match first, then one that starts with it,
+    then one that contains it. Case and spacing are ignored."""
+    wanted = " ".join(name.split()).casefold()
+    if not wanted:
+        return None
+    named = [(" ".join(n.split()).casefold(), item) for n, item in controls]
+    for test in (str.__eq__, str.startswith, str.__contains__):
+        for candidate, item in named:
+            if test(candidate, wanted):
+                return item
+    return None
 
 
 def snap_point(
@@ -324,6 +380,63 @@ class AtspiDesktop:
             self._deadline = None
             self._lock.release()
 
+    def _walk_controls(self, limit: int) -> list[tuple[str, str, Ref]]:
+        """(role, name, ref) of the showing, enabled, named controls of the focused window,
+        breadth first, until ``limit`` are found or the deadline passes."""
+        found: list[tuple[str, str, Ref]] = []
+        visited = 0
+        try:
+            queue = [w for _app, w, states in self._toplevels() if states >> _ACTIVE & 1]
+            while queue and len(found) < limit and visited < _MAX_NODES:
+                node = queue.pop(0)
+                visited += 1
+                try:
+                    states = self._states(node)
+                    if not states >> _SHOWING & 1:
+                        continue  # a hidden subtree: closed menus, other tabs
+                    role = self._call(node, _ACCESSIBLE, "GetRoleName")[0]
+                    if role in _ATSPI_ACTIONABLE and states >> _SENSITIVE & 1:
+                        name = self._name(node).strip()
+                        if name:
+                            found.append((str(role), name, node))
+                    queue.extend(self._children(node)[:200])
+                except (DesktopUnavailable, OSError, ValueError):
+                    continue  # one element that does not answer
+        except TimeoutError:
+            pass  # out of time: what was found so far is used
+        return found
+
+    def controls(self) -> list[Control]:
+        with self._lock:
+            self._deadline = time.monotonic() + _CONTROLS_BUDGET_S
+            try:
+                return [
+                    Control(role, name) for role, name, _ref in self._walk_controls(_MAX_CONTROLS)
+                ]
+            finally:
+                self._deadline = None
+
+    def press(self, name: str) -> bool:
+        with self._lock:
+            self._deadline = time.monotonic() + _PRESS_BUDGET_S
+            try:
+                found = self._walk_controls(_MAX_NODES)
+                ref = match_control([(n, r) for _role, n, r in found], name)
+                if ref is None:
+                    return False
+                self._deadline = time.monotonic() + _CALL_TIMEOUT_S * 2
+                try:  # buttons, links and menu items have an action ...
+                    if self._call(ref, "org.a11y.atspi.Action", "DoAction", "i", (0,))[0]:
+                        return True
+                except DesktopUnavailable:
+                    pass
+                # ... and a text field without one can still take the keyboard focus.
+                return bool(self._call(ref, _COMPONENT, "GrabFocus")[0])
+            except (DesktopUnavailable, TimeoutError, OSError, ValueError):
+                return False
+            finally:
+                self._deadline = None
+
     def close(self) -> None:
         self._conn.close()
 
@@ -397,6 +510,12 @@ class MacDesktop:
             focus_given = focus_given or focused
             result.append(Window(app, str(info.get("kCGWindowName", "") or ""), focused))
         return result
+
+    def controls(self) -> list[Control]:
+        return []  # not implemented on macOS yet
+
+    def press(self, name: str) -> bool:
+        return False
 
     def close(self) -> None:
         pass
@@ -490,6 +609,12 @@ class WindowsDesktop:
 
         user32.EnumWindows(visit, 0)
         return found
+
+    def controls(self) -> list[Control]:
+        return []  # not implemented on Windows yet
+
+    def press(self, name: str) -> bool:
+        return False
 
     def close(self) -> None:
         pass

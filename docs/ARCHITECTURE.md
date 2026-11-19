@@ -99,8 +99,11 @@ the arrangement, so moving a monitor needs a new one.
 
 ## Accessibility
 
-`platform/accessibility.py` only reads. It lists the open windows (app and title) for AI
-requests, and finds the button, link or field under a point. With snapping on, a click probes
+`platform/accessibility.py` lists the open windows (app and title) and the named controls of
+the focused one for AI requests, finds the button, link or field under a point, and presses a
+control by name when a confirmed plan asks for it. Listing and pressing controls is AT-SPI only
+for now, and needs no screen positions, so it works on Wayland. Every call is time-limited: a
+listing stops after 0.6 s with what it found. With snapping on, a click probes
 the gaze point and two rings around it, within *Snap distance* and 80 ms, and lands just inside
 the nearest actionable element. A point already on one is kept. On Linux only the focused
 window is searched. Wayland gives no window positions, so snapping is off there. Apps that
@@ -122,12 +125,25 @@ shortcuts, so apps still ask about unsaved work.
 
 ## AI commands
 
-Off by default. An utterance that starts with "computer" and isn't a built-in command is sent to
-a local Ollama model, with the list of open windows unless that is turned off. Window titles are
-marked as data, not instructions, and the plan is still validated and confirmed. The plan it returns must pass strict checks: only `key`, `type`, `launch`,
-`scroll`, `click` and `wait` steps, known key names, and at most ten steps. The model has no
-tools and cannot access the desktop. The plan is shown for twelve seconds and runs only after a
-click gesture or "yes". By default, servers on other machines are refused.
+Off by default. An utterance that starts with "computer" is sent to a local Ollama model, unless
+it is a built-in command ("computer, copy"), which runs at once. In *Commands* mode every
+utterance that is not a built-in command goes to the model, without the wake word. With the
+request go the open windows and the focused window's control names, unless that is turned off.
+They are marked as data, not instructions, and the plan is still validated and confirmed.
+
+The plan must pass strict checks: only `open` (http and https addresses), `launch`, `press` (a
+control by name), `type`, `key` (known key names), `scroll`, `click` and `wait` steps, and at
+most sixteen. Plans that close windows, delete, or press a control named like *Send*, *Delete*
+or *Buy* are marked risky. The model has no tools and cannot access the desktop. A plan is shown
+for twelve seconds and runs only after a click gesture or "yes", or at once if the user chose
+to confirm only risky plans. A `press` waits up to two seconds for its control to appear. By
+default, servers on other machines are refused.
+
+**Speed.** The instructions are identical for every request and come first, so Ollama keeps
+them processed; only the desktop and the request are read each time. When the mouth starts to
+open, the speech model and the AI model start loading and the desktop is read, so all three
+are ready when the request has been recognised. The overlay shows *Thinking…* while the model
+works. An emergency stop drops a request in flight.
 
 ## Configuration
 
@@ -140,7 +156,8 @@ silently overwritten. Calibrations are stored separately, one per display and ca
 
 - Camera frames and audio stay in memory only, and are discarded.
 - The network is used only to download the models on first use (all checksum-verified) and, if
-  AI commands are on, to reach the local Ollama server. Window titles go only to that server.
+  AI commands are on, to reach the local Ollama server. Window titles and the names of the
+  focused window's controls go only to that server.
   There is no telemetry.
 - The overlay and the tray icon show when the camera is in use and when the microphone is
   listening.

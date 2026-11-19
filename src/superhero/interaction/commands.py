@@ -5,7 +5,8 @@ A recognised utterance is normalised and looked up. A hit becomes a
 shared by the built-in table and user-defined commands::
 
     action:left_click     key:ctrl+shift+t     type:Kind regards
-    scroll:down           launch:firefox       stop
+    scroll:down           launch:firefox       open:https://example.org
+    stop
 
 A spec that does not follow the grammar (a typo in a user's command) becomes an
 ``invalid`` command carrying the reason, so it is reported instead of reaching
@@ -17,6 +18,7 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from superhero.config import ACTIONS
 from superhero.platform.base import KEY_NAMES
@@ -30,13 +32,35 @@ _KEY_ALIASES = {
     "pgup": "pageup", "pgdn": "pagedown", "page_up": "pageup", "page_down": "pagedown",
 }  # fmt: skip
 # Kinds of spec a user may write; ``unsupported`` and ``invalid`` are produced internally.
-SPEC_KINDS = ("action", "key", "type", "scroll", "launch", "stop")
+SPEC_KINDS = ("action", "key", "type", "scroll", "launch", "open", "stop")
+_DOMAIN = re.compile(r"^[\w-]+(\.[\w-]+)+(:\d+)?(/\S*)?$")
 
 
 @dataclass(frozen=True)
 class Command:
-    kind: str  # action | key | type | scroll | launch | stop | unsupported | invalid
+    # action | key | type | scroll | launch | open | press | wait | stop | unsupported | invalid
+    kind: str
     value: str = ""
+
+
+def web_address(text: str) -> str:
+    """A web address to open in the browser, or ``ValueError``.
+
+    Only http and https: no ``file:``, ``javascript:`` or application schemes. A bare
+    domain such as ``youtube.com/results?q=cats`` gets ``https://``.
+    """
+    url = text.strip()
+    if _DOMAIN.match(url):
+        url = "https://" + url
+    parsed = urlparse(url)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or any(c.isspace() for c in url)
+        or len(url) > 2000
+    ):
+        raise ValueError(f"not a web address: {text[:80]!r}")
+    return url
 
 
 def parse_chord(text: str) -> str:
@@ -119,6 +143,11 @@ def parse_spec(spec: str) -> Command:
         return Command("invalid", "scroll takes up or down")
     if kind in ("type", "launch") and not value:
         return Command("invalid", f"{kind} needs a value")
+    if kind == "open":
+        try:
+            return Command(kind, web_address(value))
+        except ValueError as exc:
+            return Command("invalid", str(exc))
     return Command(kind, "" if kind == "stop" else value)
 
 
@@ -128,18 +157,26 @@ def spec_problem(spec: str) -> str:
     return command.value if command.kind == "invalid" else ""
 
 
-def parse(
+def lookup(
     text: str, custom: dict[str, str] | None = None, platform: str = sys.platform
 ) -> Command | None:
-    """The command an utterance names, or ``None`` if it is not a command."""
+    """The command a phrase of the table (built-in or the user's) names, or ``None``."""
     phrase = normalize(text)
     if not phrase:
         return None
     table = builtin_commands(platform)
     table.update({normalize(k): v for k, v in (custom or {}).items()})
-    if phrase in table:
-        return parse_spec(table[phrase])
-    launch = _LAUNCH.match(phrase)
+    return parse_spec(table[phrase]) if phrase in table else None
+
+
+def parse(
+    text: str, custom: dict[str, str] | None = None, platform: str = sys.platform
+) -> Command | None:
+    """The command an utterance names, or ``None`` if it is not a command."""
+    command = lookup(text, custom, platform)
+    if command is not None:
+        return command
+    launch = _LAUNCH.match(normalize(text))
     if launch and len(launch.group(1).split()) <= 3:
         return Command("launch", launch.group(1))
     return None

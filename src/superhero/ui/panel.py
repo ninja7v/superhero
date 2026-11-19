@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -453,6 +454,8 @@ class Panel(QMainWindow):
     def __init__(self, controller: Controller) -> None:
         super().__init__()
         self.c = controller
+        self._ai_result: QLabel | None = None
+        controller.ai_tried.connect(self._show_ai_result)
         self.setWindowTitle("SUPERHERO")
         self.resize(920, 660)
         self.setMinimumSize(820, 560)
@@ -518,6 +521,7 @@ class Panel(QMainWindow):
             old.deleteLater()
         self._status_rows: dict[str, tuple[Dot, QLabel]] = {}
         self._requirement_notes: list[tuple[QLabel, Callable[[], str]]] = []
+        self._ai_result = None
         self.pointer_preview: PointerPreview | None = None
         for name, subtitle, builder in (
             ("Home", "What SUPERHERO is doing right now.", self._home),
@@ -1099,42 +1103,92 @@ class Panel(QMainWindow):
         self._sync_commands_empty()
 
     def _ai(self) -> None:
-        from superhero.ai.planner import is_local, list_models
+        from superhero.ai.planner import is_local, list_models, suggest_model
 
         ai = self.c.config.ai
-        self._toggle(
+        enabled = self._toggle(
             ai, "enabled", "AI commands",
             "Let a model work out requests the built-in commands do not cover.",
         )  # fmt: skip
+        enabled.toggled.connect(lambda on: on and self.c.warm_ai())
         self._section("Model")
         models = list_models(ai)
-        if models and not ai.model:
-            ai.model = next((m for m in models if m.startswith("gemma")), models[0])
+        if models and ai.model not in models:
+            ai.model = suggest_model(ai) or models[0]
         options = {m: m for m in models} or {
             ai.model: ai.model or "No model found — is Ollama running?"
         }
-        self._choice("Model", options, ai.model, lambda v: self._set(ai, "model", v))
+
+        def pick_model(model: str) -> None:
+            self._set(ai, "model", model)
+            self.c.warm_ai()
+
+        self._choice("Model", options, ai.model, pick_model)
         where = "on this computer" if is_local(ai.url) else "on another machine"
         server = QLabel(f"{ai.url}  ·  {where}")
         server.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._field("Server", server)
+        self._hint(
+            "Models of 4 to 12 billion parameters work well. Smaller ones answer faster; the "
+            "model stays loaded for 30 minutes after each request."
+        )
+        self._choice(
+            "Ask before running",
+            {"always": "Every plan", "risky": "Only plans that close, delete or send"},
+            ai.confirm,
+            lambda v: self._set(ai, "confirm", v),
+        )
         self._toggle(
-            ai, "share_windows", "Tell the model which windows are open",
-            "App names and window titles go with each request, so it can pick the right app.",
+            ai, "share_windows", "Tell the model what is on screen",
+            "The names of the open windows, and of the buttons, links and fields in the "
+            "focused one, go with each request. No pictures and no text you have written.",
         )  # fmt: skip
 
+        self._section("Try a request", "Plans it without running anything.")
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        request = QLineEdit(placeholderText="search youtube for relaxing music")
+        request.setAccessibleName("Request to try")
+        button = QPushButton("Plan it")
+        layout.addWidget(request, 1)
+        layout.addWidget(button)
+        self._wide(row)
+        self._ai_result = self._hint("")
+        self._ai_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        def try_it() -> None:
+            text = request.text().strip() or request.placeholderText()
+            if self._ai_result is not None:
+                self._ai_result.setText("Thinking…")
+            self.c.try_ai(text)
+
+        button.clicked.connect(try_it)
+        request.returnPressed.connect(try_it)
+
         self._section("How to use it")
+        wake = ai.wake_word
         self._hint(
-            f"In voice mode, say “{ai.wake_word}, …” — for example “{ai.wake_word}, open "
-            "Firefox and search for the weather in Paris”. The model proposes a few keystrokes "
-            "and clicks; they appear at the top of the screen and nothing happens until you wink "
-            "or say “yes”. It cannot see what is inside windows or read your files, and it takes several "
-            "seconds."
+            f"In voice mode, say “{wake}, …”, for example “{wake}, search YouTube for relaxing "
+            f"music” or “{wake}, write a new email”. In Commands mode the wake word is not "
+            "needed. The plan appears at the top of the screen and runs when you wink or say "
+            "“yes”; a right wink or “no” cancels it. Built-in commands such as "
+            f"“{wake}, copy” run at once, without the model."
         )
         self._hint(
-            "The model runs locally through Ollama, so requests stay on this computer and cost "
-            "nothing. Cloud models are not included."
+            "A plan can open web pages, launch apps, press the buttons and links of the "
+            "focused window by name (Linux for now), type, press keys and scroll. It cannot read "
+            "your files or what is written in windows. The model runs locally through Ollama, so "
+            "requests stay on this computer and cost nothing."
         )
+
+    def _show_ai_result(self, text: str) -> None:
+        try:
+            if self._ai_result is not None:
+                self._ai_result.setText(text)
+        except RuntimeError:  # the page was rebuilt and the label deleted
+            self._ai_result = None
 
     def _profiles(self) -> None:
         self._section("Profile")

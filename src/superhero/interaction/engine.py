@@ -11,6 +11,7 @@ import logging
 import sys
 import threading
 import time
+import webbrowser
 from collections.abc import Callable
 
 from fovea.events import (
@@ -28,7 +29,14 @@ from fovea.events import (
 
 from superhero.ai.planner import AIUnavailable, Plan, make_plan
 from superhero.config import AIConfig, Config
-from superhero.interaction.commands import Command, normalize, parse, parse_chord
+from superhero.interaction.commands import (
+    Command,
+    lookup,
+    normalize,
+    parse,
+    parse_chord,
+    web_address,
+)
 from superhero.platform.base import InputBackend
 from superhero.platform.displays import Display
 
@@ -38,6 +46,8 @@ _GAZE_FRESH_S = 0.5
 _LAUNCH_STEP_S = 0.45
 _PLAN_STEP_S = 0.25
 _CONFIRM_WINDOW_S = 12.0
+_PRESS_WAIT_S = 2.0  # a control can take a moment to appear after the step before
+_PRESS_RETRY_S = 0.25
 _YES = {"yes", "confirm", "do it", "run it", "go ahead", "ok", "okay"}
 _NO = {"no", "cancel", "stop", "never mind"}
 
@@ -55,6 +65,8 @@ class InteractionEngine:
         on_notice: Callable[[str], None] = lambda text: None,
         planner: Callable[[str, AIConfig, str], Plan] = make_plan,
         desktop_context: Callable[[], str] = lambda: "",
+        press: Callable[[str], bool] = lambda name: False,
+        open_url: Callable[[str], bool] = webbrowser.open,
         snap: Callable[[Display, float, float], tuple[float, float] | None] = lambda d, x, y: None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -74,9 +86,13 @@ class InteractionEngine:
         self._on_notice = on_notice
         self._planner = planner
         self._desktop_context = desktop_context
+        self._press = press
+        self._open_url = open_url
         self._snap = snap
         self._pending: Plan | None = None
         self._pending_until = 0.0
+        self._thinking = ""  # the request the AI is working on
+        self._request = 0  # bumped to drop the answer to a request that was stopped
         self._clock = clock
         self._sleep = sleep
         self._pointer_at = float("-inf")
@@ -92,6 +108,8 @@ class InteractionEngine:
         with self._lock:
             if not armed:
                 self._release_drag()
+                self._request += 1  # an answer still on its way is not used
+                self._thinking = ""
             self.armed = armed and self.input is not None
         self._on_change()
 
@@ -250,6 +268,10 @@ class InteractionEngine:
             return False
         if command.kind == "launch":
             return self._launch(command.value)
+        if command.kind == "press":
+            return self._press_control(command.value)
+        if command.kind == "open":
+            return self._open(command.value)
         with self._lock:
             if command.kind == "key":
                 try:
@@ -282,6 +304,39 @@ class InteractionEngine:
             self._sleep(_LAUNCH_STEP_S)
         return True
 
+    def _press_control(self, name: str) -> bool:
+        """Activate a control of the focused window by name, through accessibility.
+
+        Retried for a moment: after a launch or a click the control may not be there yet.
+        """
+        deadline = self._clock() + _PRESS_WAIT_S
+        while True:
+            with self._lock:
+                if not self.armed:
+                    return False
+                try:
+                    if self._press(name):
+                        return True
+                except Exception:
+                    log.warning("pressing %r failed", name, exc_info=True)
+                    return False
+            if self._clock() >= deadline:
+                return False
+            self._sleep(_PRESS_RETRY_S)
+
+    def _open(self, address: str) -> bool:
+        """Open a web address in the default browser."""
+        try:
+            url = web_address(address)
+        except ValueError as exc:  # never hand the browser anything but http(s)
+            self._on_notice(f"Command not run: {exc}")
+            return False
+        try:
+            return bool(self._open_url(url))
+        except Exception:
+            log.warning("could not open %s", url, exc_info=True)
+            return False
+
     def dictate(self, text: str) -> bool:
         if not self.armed or not text:
             return False
@@ -301,6 +356,8 @@ class InteractionEngine:
         if ai.enabled and wake and (phrase == wake or phrase.startswith(wake + " ")):
             return self._ask_ai(_after_wake_word(text, wake))
         command = None if voice.mode == "dictation" else parse(text, voice.custom_commands)
+        if command is None and voice.mode == "commands" and ai.enabled:
+            return self._ask_ai(text)  # in commands mode, any request is a command
         if command is not None:
             if command.kind == "stop":
                 return "Stopped listening"
@@ -323,31 +380,63 @@ class InteractionEngine:
         return self._pending
 
     @property
+    def thinking(self) -> str:
+        """The request the AI is working on, or an empty string."""
+        return self._thinking
+
+    @property
     def pending_text(self) -> str:
+        """What the AI is doing, for the status line: thinking, or a plan to confirm."""
+        if self._thinking:
+            request = self._thinking if len(self._thinking) <= 60 else self._thinking[:59] + "…"
+            return f"Thinking about “{request}”…"
         plan = self.pending_plan
         if plan is None:
             return ""
-        warning = "⚠ closes or deletes — " if plan.risky else ""
+        warning = "⚠ closes, deletes or sends — " if plan.risky else ""
         return f"{warning}{plan.summary()}   ·   wink or say “yes” to run, right-wink to cancel"
 
     def _ask_ai(self, request: str) -> str:
-        """Plan a free-form request. The plan is only proposed here, never run."""
+        """Plan a free-form request. The plan is proposed, or run at once if the user chose
+        not to confirm plans that close, delete or send nothing."""
         if not self.armed:
             return "Turn control on first"
-        if not request.strip():
+        request = request.strip()
+        if not request:
             return "Say what you want after the wake word"
+        # A phrase of the command table needs no model: "computer, copy" copies at once.
+        command = lookup(request, self.config.voice.custom_commands)
+        if command is not None and command.kind not in ("unsupported", "invalid", "stop"):
+            return f"Command: {request}" if self.run_command(command) else "Command not run"
+        with self._lock:
+            self._request += 1
+            ticket = self._request
+            self._thinking, self._pending = request, None
+        self._on_change()
         try:
             plan = self._planner(request, self.config.ai, self._desktop_context())
         except AIUnavailable as exc:
             return str(exc)
-        if not plan.steps:
-            return plan.explanation or "The AI could not plan that"
-        self._pending, self._pending_until = plan, self._clock() + _CONFIRM_WINDOW_S
+        finally:
+            with self._lock:
+                if self._request == ticket:
+                    self._thinking = ""
+            self._on_change()
+        with self._lock:
+            if self._request != ticket or not self.armed:
+                return "Request dropped"  # stopped or replaced while the AI was thinking
+            if not plan.steps:
+                return plan.explanation or "The AI could not plan that"
+            if self.config.ai.confirm == "risky" and not plan.risky:
+                self._start_plan(plan)
+                return plan.explanation or "Running the plan"
+            self._pending, self._pending_until = plan, self._clock() + _CONFIRM_WINDOW_S
         self._on_change()
         return plan.explanation or "Plan ready"
 
     def cancel_plan(self) -> str:
         self._pending = None
+        self._on_change()
         self._on_notice("Plan cancelled")
         return "Plan cancelled"
 
@@ -355,10 +444,14 @@ class InteractionEngine:
         """Run the pending plan on a worker thread. Returns whether one was started."""
         plan = self.pending_plan
         self._pending = None
+        self._on_change()
         if plan is None or not self.armed:
             return False
-        threading.Thread(target=self._run_plan, args=(plan,), daemon=True).start()
+        self._start_plan(plan)
         return True
+
+    def _start_plan(self, plan: Plan) -> None:
+        threading.Thread(target=self._run_plan, args=(plan,), daemon=True).start()
 
     def _run_plan(self, plan: Plan) -> None:
         for number, step in enumerate(plan.steps, start=1):
@@ -368,7 +461,10 @@ class InteractionEngine:
             if step.kind == "wait":
                 self._sleep(float(step.value))
             elif not self.run_command(step):
-                self._on_notice(f"Plan failed at step {number}: {step.kind} {step.value}")
+                if step.kind == "press" and self.armed:
+                    self._on_notice(f"Plan stopped: no “{step.value}” in the focused window")
+                else:
+                    self._on_notice(f"Plan failed at step {number}: {step.kind} {step.value}")
                 return
             self._sleep(_PLAN_STEP_S)
         self._on_notice("Done")

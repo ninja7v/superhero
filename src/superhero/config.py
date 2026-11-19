@@ -155,7 +155,8 @@ class AIConfig:
     model: str = ""
     wake_word: str = "computer"  # requests starting with this word go to the AI
     allow_remote: bool = False  # explicit consent to send requests to another machine
-    share_windows: bool = True  # tell the model which windows are open (names and titles)
+    share_windows: bool = True  # tell the model which windows are open, and their controls
+    confirm: str = "always"  # always | risky: when a plan waits for a yes before it runs
 
 
 @dataclass
@@ -200,6 +201,7 @@ RANGES: dict[type, dict[str, tuple[float, float]]] = {
 CHOICES: dict[type, dict[str, tuple[Any, ...]]] = {
     PointerConfig: {"style": ("dot", "ring", "crosshair")},
     VoiceConfig: {"mode": ("auto", "commands", "dictation")},
+    AIConfig: {"confirm": ("always", "risky")},
     Config: {"calibration_points": (5, 9, 13)},
 }
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")

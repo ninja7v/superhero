@@ -78,6 +78,10 @@ def no_real_side_effects(request, monkeypatch):
         monkeypatch.setattr(jeepney.io.blocking, "open_dbus_connection", no_bus)
         monkeypatch.setattr(portal, "open_dbus_connection", no_bus)
 
+    import webbrowser
+
+    monkeypatch.setattr(webbrowser, "open", _refuse("open a web page in the real browser"))
+
     # A proxy would route even 127.0.0.1 requests (the stand-in Ollama) off this machine.
     for name in _PROXY_VARIABLES:
         monkeypatch.delenv(name, raising=False)

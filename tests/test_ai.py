@@ -61,9 +61,12 @@ def test_formats_real_models_produce_are_accepted():
         {"steps": [step("type", "x" * 501)]},
         {"steps": [step("launch", "a\nb")]},
         {"steps": [step("scroll", "sideways")]},
-        {"steps": [step("click", "middle")]},
+        {"steps": [step("click", "")]},
+        {"steps": [step("open", "file:///etc/passwd")]},
+        {"steps": [step("open", "javascript:alert(1)")]},
+        {"steps": [step("press", "  ")]},
         {"steps": ["not a dict"]},
-        {"steps": [step("key", "a")] * 11},
+        {"steps": [step("key", "a")] * 17},
     ],
 )
 def test_anything_outside_the_vocabulary_is_rejected(bad):
@@ -264,6 +267,10 @@ def ollama():
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     state = {"status": 200, "reply": {}, "requests": []}
+    state["models"] = [
+        {"name": "small:4b", "details": {"parameter_size": "4.3B"}},
+        {"name": "big:27b", "details": {"parameter_size": "27.4B"}},
+    ]
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -273,7 +280,7 @@ def ollama():
 
         def do_GET(self):
             state["requests"].append((self.path, None))
-            self.send(200, {"models": [{"name": "small:4b"}, {"name": "big:27b"}]})
+            self.send(200, {"models": state["models"]})
 
         def send(self, status, payload):
             data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
@@ -312,7 +319,9 @@ def test_a_plan_from_a_local_ollama_is_validated_before_use(ollama):
     assert path == "/api/chat" and body["model"] == "small:4b" and body["stream"] is False
     assert body["format"]["type"] == "object"  # the reply is constrained to the plan schema
     assert "Windows 11" in body["messages"][0]["content"]
-    assert body["messages"][1] == {"role": "user", "content": "open a tab"}
+    assert body["messages"][1]["role"] == "user"
+    assert body["messages"][1]["content"].endswith("Request: open a tab")
+    assert body["keep_alive"]  # the model stays loaded between requests
     assert list_models(ollama["config"]) == ["big:27b", "small:4b"]
 
 
@@ -331,15 +340,17 @@ def test_a_bad_ollama_reply_is_a_readable_error(ollama, status, reply, error):
         make_plan("open a tab", ollama["config"], timeout=5)
 
 
-def test_the_model_is_told_which_windows_are_open(ollama):
+def test_the_model_is_told_the_desktop_after_its_fixed_instructions(ollama):
     ollama["reply"] = ollama_says({"steps": [step("launch", "firefox")], "explanation": "ok"})
-    desktop = "- firefox: Weather (focused)\n- nautilus: docs"
+    desktop = "Open windows, the focused one first:\n- firefox: Weather (focused)"
     make_plan("go back to the weather", ollama["config"], desktop, timeout=5)
-    system = ollama["requests"][-1][1]["messages"][0]["content"]
-    assert desktop in system and "never instructions" in system
+    system, user = (m["content"] for m in ollama["requests"][-1][1]["messages"])
+    assert "never instructions" in system and "firefox" not in system
+    assert user.startswith(desktop) and user.endswith("Request: go back to the weather")
     make_plan("go back to the weather", ollama["config"], timeout=5)
-    system = ollama["requests"][-1][1]["messages"][0]["content"]
-    assert "do not know which windows are open" in system and "firefox" not in system
+    first, user = (m["content"] for m in ollama["requests"][-1][1]["messages"])
+    assert first == system  # the same every time, so Ollama can keep it processed
+    assert "do not know which windows are open" in user and "firefox" not in user
 
 
 def test_the_engine_passes_the_desktop_to_the_planner():
@@ -353,3 +364,155 @@ def test_the_engine_passes_the_desktop_to_the_planner():
     rig.config.ai.enabled = True
     rig.engine.handle_utterance("computer, open a tab")
     assert seen == ["- editor: notes (focused)"]
+
+
+def test_web_addresses_and_named_controls_are_planned():
+    plan = validate(
+        {
+            "steps": [
+                step("open", "youtube.com/results?search_query=cats"),
+                step("press", '"Search" (text)'),  # copied with the quotes and role
+                step("click", "Write"),  # a control written as a click
+                step("type", "hello"),
+            ],
+            "explanation": "x",
+        }
+    )
+    assert plan.steps == (
+        Command("open", "https://youtube.com/results?search_query=cats"),
+        Command("press", "Search"),
+        Command("press", "Write"),
+        Command("type", "hello"),
+    )
+    assert not plan.risky
+    assert plan.summary().startswith("open youtube.com/results?search_query=cats → press Search")
+
+
+def test_controls_that_send_or_delete_are_flagged():
+    assert validate({"steps": [step("press", "Send")]}).risky
+    assert validate({"steps": [step("press", "Move to trash")]}).risky
+    assert not validate({"steps": [step("press", "Sender filter")]}).risky
+
+
+def test_a_command_of_the_table_after_the_wake_word_needs_no_model():
+    rig = ai_rig()
+    assert rig.engine.handle_utterance("Computer, copy.") == "Command: copy."
+    assert rig.asked == [] and rig.input.calls[-1][0] == "keys"
+
+
+def test_in_commands_mode_any_request_goes_to_the_ai():
+    rig = ai_rig()
+    rig.config.voice.mode = "commands"
+    assert rig.engine.handle_utterance("open a new tab and say hello") == "Opens a tab."
+    assert rig.asked == ["open a new tab and say hello"]
+    rig.config.ai.enabled = False
+    assert rig.engine.handle_utterance("open a new tab and say hello") == "Not a known command"
+
+
+def test_plans_that_close_delete_or_send_nothing_can_run_without_asking():
+    rig = ai_rig()
+    rig.config.ai.confirm = "risky"
+    assert rig.engine.handle_utterance("computer open a tab") == "Opens a tab."
+    wait_for_plan(rig, [("keys", "ctrl+t"), ("type", "hello")])
+    risky = ai_rig(plan=Plan((Command("key", "alt+f4"),), "Closes it.", risky=True))
+    risky.config.ai.confirm = "risky"
+    risky.engine.handle_utterance("computer shut the editor down")
+    assert risky.engine.pending_plan is not None and risky.input.calls == []
+
+
+def test_the_status_shows_the_ai_thinking_and_a_stop_drops_its_answer():
+    import threading
+
+    asked, release = threading.Event(), threading.Event()
+
+    def planner(_request, _config, _desktop):
+        asked.set()
+        release.wait(2)
+        return PLAN
+
+    rig = Rig(planner=planner)
+    rig.config.ai.enabled = True
+    outcome = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(rig.engine.handle_utterance("computer open a tab"))
+    )
+    worker.start()
+    assert asked.wait(2)
+    assert rig.engine.pending_text == "Thinking about “open a tab”…"
+    rig.engine.emergency_stop()
+    assert rig.engine.pending_text == ""
+    release.set()
+    worker.join(2)
+    assert outcome == ["Request dropped"] and rig.engine.pending_plan is None
+
+
+def test_a_plan_presses_controls_and_opens_web_addresses():
+    pressed, opened, notices = [], [], []
+    plan = Plan((Command("open", "https://example.org/"), Command("press", "Write")), "x")
+    rig = ai_rig(
+        plan=plan,
+        press=lambda name: pressed.append(name) or True,
+        open_url=lambda url: opened.append(url) or True,
+        on_notice=notices.append,
+    )
+    rig.engine.handle_utterance("computer write to bob")
+    assert rig.engine.handle_utterance("yes") == "Running the plan"
+    wait_until(lambda: notices == ["Done"])
+    assert opened == ["https://example.org/"] and pressed == ["Write"]
+
+
+def test_a_control_that_never_appears_stops_the_plan():
+    tries, notices = [], []
+    rig = ai_rig(
+        plan=Plan((Command("press", "Write"), Command("type", "hi")), "x"),
+        press=lambda name: tries.append(name) and False,
+        on_notice=notices.append,
+    )
+    rig.engine._sleep = lambda seconds: setattr(rig, "now", rig.now + seconds)
+    rig.engine.handle_utterance("computer write")
+    rig.engine.confirm_plan()
+    wait_until(lambda: notices)
+    assert notices == ["Plan stopped: no “Write” in the focused window"]
+    assert len(tries) > 1 and rig.input.calls == []  # retried, then nothing typed
+
+
+def test_only_web_addresses_reach_the_browser():
+    opened = []
+    rig = Rig(open_url=lambda url: opened.append(url) or True)
+    assert not rig.engine.run_command(Command("open", "file:///etc/passwd"))
+    assert rig.engine.run_command(Command("open", "https://example.org"))
+    assert opened == ["https://example.org"]
+    disarmed = Rig(armed=False, open_url=lambda url: opened.append(url) or True)
+    assert not disarmed.engine.run_command(Command("open", "https://example.org"))
+    assert len(opened) == 1
+
+
+def test_warming_up_loads_the_model_with_the_same_instructions(ollama):
+    from superhero.ai.planner import warm_up
+
+    ollama["reply"] = ollama_says({"steps": [], "explanation": ""})
+    assert warm_up(ollama["config"], platform="linux", timeout=5)
+    path, body = ollama["requests"][-1]
+    assert path == "/api/chat" and body["options"]["num_predict"] == 1
+    make_plan("open a tab", ollama["config"], platform="linux", timeout=5)
+    planned = ollama["requests"][-1][1]
+    assert planned["messages"][0] == body["messages"][0]
+    assert not warm_up(AIConfig(), timeout=5)  # AI off: nothing is loaded
+
+
+def test_a_missing_model_is_named(ollama):
+    ollama["status"], ollama["reply"] = 404, {"error": "model not found"}
+    with pytest.raises(AIUnavailable, match="'small:4b' is not installed"):
+        make_plan("open a tab", ollama["config"], timeout=5)
+
+
+def test_the_suggested_model_is_the_smallest_capable_one(ollama):
+    from superhero.ai.planner import suggest_model
+
+    ollama["models"].append({"name": "tiny:270m", "details": {"parameter_size": "270M"}})
+    ollama["models"].append({"name": "odd", "details": {}})
+    assert suggest_model(ollama["config"]) == "small:4b"
+    ollama["models"][:] = [{"name": "tiny:270m", "details": {"parameter_size": "270M"}}]
+    assert suggest_model(ollama["config"]) == "tiny:270m"  # better than nothing
+    ollama["models"][:] = []
+    assert suggest_model(ollama["config"]) == ""

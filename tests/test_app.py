@@ -395,7 +395,7 @@ def test_all_displays_get_an_overlay_and_a_calibration_window(monkeypatch):
 
 def test_the_desktop_reader_is_optional(monkeypatch):
     from superhero import app as app_module
-    from superhero.platform.accessibility import DesktopUnavailable, Element, Window
+    from superhero.platform.accessibility import Control, DesktopUnavailable, Element, Window
 
     class FakeDesktop:
         can_locate = True
@@ -406,13 +406,23 @@ def test_the_desktop_reader_is_optional(monkeypatch):
         def element_at(self, x, y):
             return Element("push button", 900, 500, 120, 30)
 
+        def controls(self):
+            return [Control("push button", "Save")]
+
+        def press(self, name):
+            return name == "Save"
+
         def close(self):
             pass
 
     monkeypatch.setattr(app_module, "open_desktop", FakeDesktop)
     _app, controller = make_controller(monkeypatch)
     try:
-        assert controller.desktop_context() == "- editor: notes (focused)"
+        assert controller.desktop_context() == (
+            "Open windows, the focused one first:\n- editor: notes (focused)\n\n"
+            'Controls in the focused window:\n- "Save" (push button)'
+        )
+        assert controller.press_control("Save") and not controller.press_control("Quit")
         controller.config.ai.share_windows = False
         assert controller.desktop_context() == ""
         assert controller.snap(controller.display, 0.5, 0.5) is None  # already on the button
@@ -450,5 +460,26 @@ def test_an_unavailable_desktop_reader_is_retried_later(monkeypatch):
         controller._desktop_retry_at = 0.0  # ...but after a while (the permission granted)
         controller.desktop_context()
         assert attempts == [1, 1]
+    finally:
+        controller.shutdown()
+
+
+def test_a_request_typed_in_the_panel_is_planned_but_not_run(monkeypatch):
+    from superhero import app as app_module
+    from superhero.ai.planner import Plan
+    from superhero.interaction.commands import Command
+
+    plan = Plan((Command("open", "https://example.org/"),), "Opens example.org.")
+    monkeypatch.setattr(app_module, "make_plan", lambda request, config, desktop: plan)
+    app, controller = make_controller(monkeypatch)
+    try:
+        results = []
+        controller.ai_tried.connect(results.append)
+        controller.try_ai("open example")
+        deadline = time.monotonic() + 2
+        while not results and time.monotonic() < deadline:
+            app.processEvents()
+        assert results == ["Opens example.org.\nopen example.org"]
+        assert controller.engine.pending_plan is None
     finally:
         controller.shutdown()
